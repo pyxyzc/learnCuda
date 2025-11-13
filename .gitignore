@@ -5,3 +5,6 @@ matmul2
 .project
 topk_kernel
 output.log
+retrieval_kernel
+retrieve_report.nsys-rep
+retrieve_report.sqlite

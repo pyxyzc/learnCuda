@@ -60,8 +60,9 @@ void init_mat(float *mat, int sz){
 
 int main(){
     float *h_Q, *h_K;
-    int B = 10, dim = 8 * 128;
-    int N = 1000;
+    int B = 32;
+    int dim = 576;
+    int N = 3000;
 
     h_Q = (float*)malloc(B * dim * sizeof(float));
     h_K = (float*)malloc(N * dim * sizeof(float));
@@ -74,8 +75,9 @@ int main(){
     h_kv_len = (int*)malloc(B * sizeof(int));
     int *kv_start_offsets ;
     kv_start_offsets = (int*)malloc((B+1) * sizeof(int));
+    int kv_len_each = (10000 / 128);
     for(int i = 0; i < B; ++i){
-        h_kv_len[i] = B * 5 + i;
+        h_kv_len[i] = kv_len_each;
         kv_start_offsets[i] = total_kv_len;
         total_kv_len += h_kv_len[i];
     }
@@ -120,7 +122,9 @@ int main(){
     int num_block = (total_kv_len + 255) / 256;
     dim3 numBlocks = {(unsigned int)num_block};
 
-    retrieval_kernel<<<numBlocks, numThreads>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
+    for (int i = 0; i < 10; ++i){
+        retrieval_kernel<<<numBlocks, numThreads>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
+    }
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
@@ -128,10 +132,10 @@ int main(){
 
     cudaEventRecord(start, 0);
     retrieval_kernel<<<numBlocks, numThreads>>>(d_Q, d_K, d_score, d_block_table, d_batch_index, dim, B, total_kv_len);
-    cuda_check(cudaPeekAtLastError());
-    cuda_check(cudaDeviceSynchronize());
     cudaEventRecord(stop, 0);
-    cudaEventSynchronize(stop);
+
+    cuda_check(cudaPeekAtLastError());
+    cuda_check(cudaEventSynchronize(stop));
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
     printf("Time spent on retrieval_kernel: %f ms\n", milliseconds);
@@ -143,18 +147,19 @@ int main(){
     h_score_gpu = (float*)malloc(total_kv_len * sizeof(float));
     cuda_check(cudaMemcpy(h_score_gpu, d_score, total_kv_len * sizeof(float), cudaMemcpyDeviceToHost));
 
-    retrieval_host(h_Q, h_K, h_score, block_table, batch_index, dim, B, total_kv_len);
+    for (int i = 0; i < 10; ++i){
+        retrieval_host(h_Q, h_K, h_score, block_table, batch_index, dim, B, total_kv_len);
+    }
 
     auto h_start = std::chrono::high_resolution_clock::now();
     retrieval_host(h_Q, h_K, h_score, block_table, batch_index, dim, B, total_kv_len);
     auto h_stop = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(h_stop - h_start);
-    printf("Time spent on retrieval_host: %ld ms\n", duration.count());
+    auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(h_stop - h_start);
+    printf("Time spent on retrieval_host: %ld ms\n", duration.count() / 1000000);
 
     float eps = 1e-3;
     for(int i = 0; i < total_kv_len; ++i){
         float diff = fabs(h_score[i] - h_score_gpu[i]);
-        printf("h %f, d %f\n", h_score[i], h_score_gpu[i]);
         if(diff > eps){
             printf("not ok\n");
         }
