@@ -14,12 +14,14 @@
     }                                                                   \
   } while(0)
 
-using clock = std::chrono::high_resolution_clock;
 
 int main(){
-  const size_t total_bytes = 1ULL << 30;  // 1 GiB
-  const size_t chunk_bytes = 1ULL << 20;  // 1 MiB
+  using clock = std::chrono::high_resolution_clock;
+  size_t total_bytes = 1ULL << 30;  // 1 GiB
+  size_t chunk_bytes = 1ULL << 20;  // 1 MiB
+  chunk_bytes /= (256);
   const int    N = total_bytes / chunk_bytes;
+  printf("num of copy: %d\n", N);
 
   // Allocate pinned host + device buffers
   void *h, *d;
@@ -30,9 +32,20 @@ int main(){
   CUDA_CHECK(cudaMemcpy(d, h, total_bytes, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaDeviceSynchronize());
 
+
+  // —— Test 0: 一次大拷贝 ——
+  auto tt0 = clock::now();
+  CUDA_CHECK(cudaMemcpy(d, h, total_bytes, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaDeviceSynchronize());
+  auto tt1 = clock::now();
+  double t_big = std::chrono::duration<double>(tt1 - tt0).count();
+  std::cout << "ONE big copy: "
+            << (double)total_bytes / t_big / 1e9
+            << " GB/s\n";
+
   // --- Test 1: simple async copies ---
-  cudaStream_t s1;
-  CUDA_CHECK(cudaStreamCreate(&s1));
+  // cudaStream_t s1;
+  // CUDA_CHECK(cudaStreamCreate(&s1));
   auto t0 = clock::now();
   for(int i = 0; i < N; i++){
     CUDA_CHECK(cudaMemcpyAsync(
@@ -40,15 +53,15 @@ int main(){
       (char*)h + i*chunk_bytes,
       chunk_bytes,
       cudaMemcpyHostToDevice,
-      s1));
+      0));
   }
-  CUDA_CHECK(cudaStreamSynchronize(s1));
+  // CUDA_CHECK(cudaStreamSynchronize(s1));
   auto t1 = clock::now();
   double t_simple = std::chrono::duration<double>(t1 - t0).count();
   std::cout << "Simple async: "
             << (double)total_bytes / t_simple / 1e9
             << " GB/s\n";
-  CUDA_CHECK(cudaStreamDestroy(s1));
+  // CUDA_CHECK(cudaStreamDestroy(s1));
 
   // --- Test 2: CUDA Graph of the same copies ---
   cudaStream_t s2;
