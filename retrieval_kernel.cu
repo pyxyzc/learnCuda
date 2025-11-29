@@ -148,9 +148,11 @@ if (((T).options().dtype() != (expect_type))) { \
     throw std::runtime_error("mismatched tensor dtype"); \
 }
 
-void cuda_retrieval(torch::Tensor query, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor score){
+void cuda_retrieval(torch::List<torch::Tensor> query_list, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor score){
     // query: a list of ptr
     // repre_cache: a ptr
+    // concatenate list of query tensors along batch dim
+    auto query = torch::cat(query_list, 0);
     CHECK_TORCH_TENSOR_DTYPE(query, torch::kFloat32);
     CHECK_TORCH_TENSOR_DTYPE(repre_cache, torch::kFloat32);
     int s = q_index.size(0);
