@@ -152,12 +152,10 @@ if (((T).options().dtype() != (expect_type))) { \
 void cuda_retrieval(const std::vector<torch::Tensor> &query_list, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor score){
     // query: a list of ptr
     // repre_cache: a ptr
-    // concatenate list of query tensors along batch dim
-    auto query = torch::cat(query_list, 0);
-    CHECK_TORCH_TENSOR_DTYPE(query, torch::kFloat32);
+    CHECK_TORCH_TENSOR_DTYPE(query_list[0], torch::kFloat32);
     CHECK_TORCH_TENSOR_DTYPE(repre_cache, torch::kFloat32);
     int s = q_index.size(0);
-    int dim = query.size(1);
+    int dim = repre_cache.size(1);
     dim3 numThreads = {(unsigned int)(32)};
     dim3 numBlocks = {(unsigned int) s};
     size_t bytes = numThreads.x * sizeof(float);
