@@ -5,13 +5,16 @@
 #include <vector_types.h>
 #include <cub/cub.cuh>
 #include <torch/extension.h>
+#include <pybind11/stl.h>
 #include <vector>
 #include <torch/types.h>
+
+namespace py = pybind11;
 
 #define STRINGFY(func) #func
 
 #define TORCH_BINDING_COMMON_EXTENSION(func) \
-    m.def(STRINGFY(func), &func, STRINGFY(func));
+    m.def(STRINGFY(func), &func, STRINGFY(func))
 
 #define CHECK_TORCH_TENSOR_DTYPE(T, expect_type) \
     if (((T).options().dtype() != (expect_type))) { \

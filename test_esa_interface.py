@@ -7,7 +7,7 @@ torch.set_grad_enabled(False)
 
 # Load the CUDA kernel as a python module
 lib = load(
-    name="esa_utils",
+    name="esa_interface",
     sources=["esa_interface.cu"],
     extra_cflags=["-std=c++17"],
 )
@@ -36,8 +36,23 @@ offsets = torch.cat([offsets, torch.tensor([s], dtype=torch.int32).cuda()])
 workspace = torch.zeros(10000, dtype=torch.int32).cuda()
 
 start = time.time()
-esa_retrieval(query_list, repre_cache, q_table, repre_table, score,
-              score_sorted, index, index_sorted, offsets, workspace)
+
+Input = lib.RetrievalInputTensor
+Output = lib.RetrievalOutputTensor
+
+Input.query_list = query_list
+Input.repre_cache = repre_cache
+Input.q_table = q_table
+Input.repre_table = repre_table
+Input.offsets = offsets
+Input.workspace = workspace
+
+Output.score = score
+Output.score_sorted = score_sorted
+Output.index_ranged = index
+Output.index_sorted = index_sorted
+
+esa_retrieval(Input, Output)
 print("launch spent: ", time.time() - start)
 torch.cuda.synchronize()
 elapsed_cuda = time.time() - start

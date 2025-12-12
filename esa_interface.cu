@@ -17,7 +17,35 @@ void esa_repre(torch::Tensor key_cache, torch::Tensor repre_cache, torch::Tensor
         }));
 }
 
-void esa_retrieval(const std::vector<torch::Tensor> &query_list, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor score, torch::Tensor score_sorted, torch::Tensor index_ranged, torch::Tensor index_sorted, torch::Tensor batch_offset, torch::Tensor workspace){
+struct RetrievalInputTensor{
+    py::list query_list;
+    torch::Tensor repre_cache;
+    torch::Tensor q_index;
+    torch::Tensor repre_index;
+    torch::Tensor batch_offset;
+    torch::Tensor workspace;
+};
+
+struct RetrievalOutputTensor{
+    torch::Tensor score;
+    torch::Tensor score_sorted;
+    torch::Tensor index_ranged;
+    torch::Tensor index_sorted;
+};
+
+void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
+    auto query_list = input.query_list;
+    auto repre_cache = input.repre_cache;
+    auto q_index = input.q_index;
+    auto repre_index = input.repre_index;
+    auto batch_offset = input.batch_offset;
+    auto workspace = input.workspace;
+
+    auto score = output.score;
+    auto score_sorted = output.score_sorted;
+    auto index_ranged = output.index_ranged;
+    auto index_sorted = output.index_sorted;
+
     int s = q_index.size(0);
     int dim = repre_cache.size(1);
     int batch = query_list.size();
@@ -29,7 +57,8 @@ void esa_retrieval(const std::vector<torch::Tensor> &query_list, torch::Tensor r
             float** Q_ptrs = nullptr;
             cudaMallocManaged(&Q_ptrs, batch * sizeof(float*));
             for(int i = 0; i < batch; ++i) {
-            Q_ptrs[i] = query_list[i].data_ptr<float>();
+                auto q_tensor = query_list[i].cast<torch::Tensor>();
+                Q_ptrs[i] = q_tensor.data_ptr<float>();
             }
             printf("is float32\n");
             size_t bytes = numThreads.x * sizeof(float);
@@ -52,7 +81,8 @@ void esa_retrieval(const std::vector<torch::Tensor> &query_list, torch::Tensor r
             __half** Q_ptrs = nullptr;
             cudaMallocManaged(&Q_ptrs, batch * sizeof(__half*));
             for(int i = 0; i < batch; ++i) {
-                Q_ptrs[i] = reinterpret_cast<__half*>(query_list[i].data_ptr());
+                auto q_tensor = query_list[i].cast<torch::Tensor>();
+                Q_ptrs[i] = reinterpret_cast<__half*>(q_tensor.data_ptr());
             }
             printf("is float16\n");
             size_t bytes = numThreads.x * sizeof(float);
@@ -82,7 +112,8 @@ void esa_retrieval(const std::vector<torch::Tensor> &query_list, torch::Tensor r
             __nv_bfloat16** Q_ptrs = nullptr;
             cudaMallocManaged(&Q_ptrs, batch * sizeof(__nv_bfloat16*));
             for(int i = 0; i < batch; ++i) {
-                Q_ptrs[i] = reinterpret_cast<__nv_bfloat16*>(query_list[i].data_ptr());
+                auto q_tensor = query_list[i].cast<torch::Tensor>();
+                Q_ptrs[i] = reinterpret_cast<__nv_bfloat16*>(q_tensor.data_ptr());
             }
             printf("is bfloat16\n");
             size_t bytes = numThreads.x * sizeof(float);
@@ -134,7 +165,24 @@ void esa_topk(torch::Tensor score, torch::Tensor index, torch::Tensor offsets, t
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    TORCH_BINDING_COMMON_EXTENSION(esa_retrieval)
-    TORCH_BINDING_COMMON_EXTENSION(esa_topk)
-    TORCH_BINDING_COMMON_EXTENSION(esa_repre)
+    m.doc() = "ESA cuda kernels for block feature extraction and block retrieval";
+    py::class_<RetrievalInputTensor>(m, "RetrievalInputTensor")
+        .def(py::init<>())
+        .def_readwrite("query_list", &RetrievalInputTensor::query_list)
+        .def_readwrite("repre_cache", &RetrievalInputTensor::repre_cache)
+        .def_readwrite("q_index", &RetrievalInputTensor::q_index)
+        .def_readwrite("repre_index", &RetrievalInputTensor::repre_index)
+        .def_readwrite("batch_offset", &RetrievalInputTensor::batch_offset)
+        .def_readwrite("workspace", &RetrievalInputTensor::workspace);
+
+    py::class_<RetrievalOutputTensor>(m, "RetrievalOutputTensor")
+        .def(py::init<>())
+        .def_readwrite("score", &RetrievalOutputTensor::score)
+        .def_readwrite("score_sorted", &RetrievalOutputTensor::score_sorted)
+        .def_readwrite("index_ranged", &RetrievalOutputTensor::index_ranged)
+        .def_readwrite("index_sorted", &RetrievalOutputTensor::index_sorted);
+
+    TORCH_BINDING_COMMON_EXTENSION(esa_retrieval);
+    TORCH_BINDING_COMMON_EXTENSION(esa_topk);
+    TORCH_BINDING_COMMON_EXTENSION(esa_repre);
 }
