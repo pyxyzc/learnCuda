@@ -1,168 +1,137 @@
+import numpy as np
 import torch
-import math
 from torch.utils.cpp_extension import load
+import pytest
 import time
 
 torch.set_grad_enabled(False)
-
 # Load the CUDA kernel as a python module
-lib = load(
+esa_lib = load(
     name="esa_interface",
     sources=["esa_interface.cu"],
     extra_cflags=["-std=c++17"],
 )
-esa_retrieval = lib.esa_retrieval
-esa_topk = lib.esa_topk
-esa_repre = lib.esa_repre
+esa_retrieval = esa_lib.esa_retrieval
+esa_topk = esa_lib.esa_topk
+esa_repre = esa_lib.esa_repre
 
-b = 10
-s = 100
-dim = 576
-N = 100
-query_list = []
-dtype = torch.float16
-for i in range(b):
-    query_list.append(torch.rand(dim, dtype=dtype).cuda())
-repre_cache = torch.randn(N, dim, dtype = dtype).cuda()
-repre_table = torch.arange(0, s, dtype = torch.int32).cuda()
-q_table = torch.arange(0, s, dtype = torch.int32).cuda()
-q_table = q_table % b
-score = torch.zeros(s, dtype = dtype).cuda()
-score_sorted = torch.zeros(s, dtype = dtype).cuda()
-index = torch.arange(0, s, dtype=torch.int32).cuda()
-index_sorted = torch.arange(0, s, dtype=torch.int32).cuda()
-offsets = torch.arange(0, s, math.ceil(s / b), dtype=torch.int32).cuda()
-offsets = torch.cat([offsets, torch.tensor([s], dtype=torch.int32).cuda()])
-workspace = torch.zeros(10000, dtype=torch.int32).cuda()
+class style():
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    BLUE = '\033[94m'
+    YELLOW = '\033[93m'
+    RESET = '\033[0m'
 
-start = time.time()
+def print_red(msg):
+    print(style.RED + msg + style.RESET)
 
-Input = lib.RetrievalInputTensor()
-Output = lib.RetrievalOutputTensor()
+def print_green(msg):
+    print(style.GREEN + msg + style.RESET)
 
-Input.query_list = query_list
-Input.repre_cache = repre_cache
-Input.q_table = q_table
-Input.repre_table = repre_table
-Input.offsets = offsets
-Input.workspace = workspace
+def print_blue(msg):
+    print(style.BLUE + msg + style.RESET)
 
-Output.score = score
-Output.score_sorted = score_sorted
-Output.index_ranged = index
-Output.index_sorted = index_sorted
+def print_yellow(msg):
+    print(style.YELLOW + msg + style.RESET)
 
-esa_retrieval(Input, Output)
-print("launch spent: ", time.time() - start)
-torch.cuda.synchronize()
-elapsed_cuda = time.time() - start
-print(f"esa_retrieval time: {elapsed_cuda:.6f} s")
+@pytest.mark.parametrize("batch_size", [1, 10])
+@pytest.mark.parametrize("num_repre_blocks", [50, 100])
+@pytest.mark.parametrize("dim", [576, 1024])
+def test_esa_retrieval(batch_size, num_repre_blocks, dim):
+    print(f'''TEST esa_retrieval
+{' '*4}total number of queries (a.k.a batch_size): {batch_size}
+{' '*4}number of key blocks for each request: {num_repre_blocks // batch_size}
+{' '*4}dim (num_heads * hidden_size): {dim}\n''')
+    N = num_repre_blocks * 2
+    query_list = []
+    dtype = torch.float32
+    for i in range(batch_size):
+        query_list.append(torch.rand(dim, dtype=dtype).cuda())
+    repre_cache = torch.randn(N, dim, dtype = dtype).cuda()
 
+    rng = np.random.default_rng()
+    range_n = np.arange(N)
+    repre_index = rng.choice(range_n, size=num_repre_blocks, replace=False)
+    repre_index = torch.from_numpy(repre_index).to(torch.int32).cuda()
+    q_index = torch.randint(0, batch_size, size = [num_repre_blocks], dtype = torch.int32).cuda()
+    score = torch.zeros(num_repre_blocks, dtype = dtype).cuda()
+    score_sorted = torch.zeros(num_repre_blocks, dtype = dtype).cuda()
+    index = torch.cat([torch.arange(0, num_repre_blocks / batch_size, dtype=torch.int32) for _ in range(batch_size)]).cuda()
+    index_sorted = torch.arange(0, num_repre_blocks, dtype=torch.int32).cuda()
+    batch_offset = torch.arange(0, num_repre_blocks, num_repre_blocks / batch_size, dtype=torch.int32).cuda()
+    batch_offset = torch.cat([batch_offset, torch.tensor([num_repre_blocks], dtype=torch.int32).cuda()])
+    workspace = torch.zeros(10000, dtype=torch.int32).cuda()
 
-def naive_retrieval():
-    query = torch.stack(query_list)
-    score_gt = (query[q_table] * repre_cache[repre_table]).sum(-1)
-    return score_gt
+    Input = esa_lib.RetrievalInputTensor()
+    Input.query_list = query_list
+    Input.repre_cache = repre_cache
+    Input.q_index = q_index
+    Input.repre_index = repre_index
+    Input.batch_offset = batch_offset
+    Input.workspace = workspace
 
-start = time.time()
-score_gt = naive_retrieval()
-torch.cuda.synchronize()
-elapsed_naive = time.time() - start
-print(f"naive_retrieval time: {elapsed_naive:.6f} s")
-print("score_gt: ", score_gt)
-print("score: ", score)
-print("score_sorted: ", score_sorted)
-print("index_sorted: ", index_sorted)
+    Output = esa_lib.RetrievalOutputTensor()
+    Output.score = score
+    Output.score_sorted = score_sorted
+    Output.index_ranged = index
+    Output.index_sorted = index_sorted
 
-diff = (score - score_gt).abs()
-print("diff: ", diff.mean(), diff.max())
-
-batch_size = 10
-total_seq_len = 3200 // 128 * batch_size
-topk = 10
-num_layers = 61
-warmup_iters = 10
-
-score = torch.randn(total_seq_len).cuda()
-index = torch.arange(0, total_seq_len, dtype=torch.int32).cuda()
-offsets = torch.arange(0, total_seq_len, math.ceil(total_seq_len / batch_size), dtype=torch.int32).cuda()
-offsets = torch.cat([offsets, torch.tensor([total_seq_len], dtype=torch.int32).cuda()])
-
-
-print(f'''info:
-==========
-Select {topk} from {total_seq_len//batch_size}
-batch_size:{batch_size}, num_layers: {num_layers}
-==========''')
-print("offsets: ", offsets, offsets.shape)
-
-batch_size = offsets.shape[0] - 1
-score_out = torch.zeros(total_seq_len).cuda()
-index_out = torch.zeros(total_seq_len, dtype=torch.int32).cuda()
-
-
-cost_time = []
-workspace = torch.zeros(10000, dtype=torch.int32).cuda()
-for iter in range(warmup_iters + num_layers):
-    begin = time.time()
-    # reset index tensor for radixSort
-    # for i in range(total_seq_len):
-    #     index[i] = i
-    # for i in range(batch_size + 1):
-    #     offsets[i] = i * math.ceil(total_seq_len / batch_size)
-    esa_topk(score, index, offsets, score_out, index_out, workspace)
-
+    start = time.perf_counter_ns()
+    esa_retrieval(Input, Output)
     torch.cuda.synchronize()
-    duration = time.time() - begin
-    if iter >= warmup_iters:
-        cost_time.append(duration)
+    duration = time.perf_counter_ns() - start
+    print_green(f"{' '*4}esa_retrieval host API time: {duration/1e6:.3f} ms")
 
-print(f"esa topk: each_layer: {sum(cost_time) / len(cost_time)}, all_layers: {sum(cost_time)}")
+    def naive_retrieval():
+        query = torch.stack(query_list)
+        score_gt = (query[q_index] * repre_cache[repre_index]).sum(-1)
+        index_gt = torch.cat([ score_gt[s:t].argsort(descending=True) for s,t in zip(batch_offset[:-1], batch_offset[1:]) ])
+        return score_gt, index_gt
 
-
-cost_time_2 = []
-for iter in range(warmup_iters + num_layers):
-    begin = time.time()
-    gt_index = []
-    for start, stop in zip(offsets[:-1], offsets[1:]):
-        sorted, indices = torch.topk(score[start:stop], dim=0, k=topk)
-        indices += start
-        gt_index.append(indices)
-    gt_index = torch.stack(gt_index)
-    # score = score.view(batch_size, -1)
-    # _, gt_index = torch.topk(score, dim=1, k=topk)
-    # gt_index += torch.arange(0, batch_size)[:, None].cuda() * math.ceil(total_seq_len / batch_size)
-    gt_index = gt_index.view(-1)
+    start = time.perf_counter_ns()
+    score_gt, index_gt = naive_retrieval()
     torch.cuda.synchronize()
-    duration = time.time() - begin
-    if iter >= warmup_iters:
-        cost_time_2.append(duration)
+    duration = time.perf_counter_ns() - start
+    print_red(f"{' '*4}naive_retrieval host API time: {duration/1e6:.3f} ms")
 
-print(f"torch topk: each_layer: {sum(cost_time_2) / len(cost_time_2)}, all_layers: {sum(cost_time_2)}")
-
-index_out = index_out.view(batch_size, -1)
-gt_index = gt_index.view(batch_size, -1)
-print(index_out.shape, gt_index.shape)
-diff = (index_out[:, :topk] - gt_index).abs()
-print("diff: ", diff.max())
+    diff = (score - score_gt).abs()
+    diff_index = (index_sorted - index_gt).abs().to(torch.float32)
+    print_blue(f"{' '*4}score diff: {diff.mean():.3f}(mean), {diff.max():.3f}(max)")
+    print_blue(f"{' '*4}index diff: {diff_index.mean():.3f}(mean), {diff_index.max():.3f}(max)")
+    print("")
 
 
-# extract repre
-dtype = torch.float16
-key_cache = torch.randn(1000, 128, 8, 128, dtype=dtype).cuda()
-repre_cache = torch.randn(1000, 1, 8, 128, dtype=dtype).cuda()
-repre_cache2 = torch.randn(1000, 1, 8, 128, dtype=dtype).cuda()
-block_table = torch.arange(100, dtype=torch.int32).cuda()
-begin = time.time()
-esa_repre(key_cache.view(1000, 128, -1), repre_cache.view(1000, 1, -1), block_table, block_table)
-torch.cuda.synchronize()
-print("esa_repre spent: ", time.time() - begin)
+@pytest.mark.parametrize("num_repre_blocks", [100, 500, 1000])
+@pytest.mark.parametrize("dim", [576, 1024])
+def test_esa_repre(num_repre_blocks, dim):# extract repre
+    print(f'''TEST esa_repre
+{' '*4}total number of blocks to extract_repre: {num_repre_blocks}
+{' '*4}dim (num_heads * hidden_size): {dim}\n''')
+    dtype = torch.bfloat16
+    N = 2 * num_repre_blocks
+    block_size = 128
+    key_cache = torch.randn(N, block_size, dim, dtype=dtype).cuda()
+    repre_cache = torch.randn(N, 1, dim, dtype=dtype).cuda()
+    repre_cache2 = torch.randn(N, 1, dim, dtype=dtype).cuda()
 
-begin = time.time()
-for blk_id in block_table:
-    repre_cache2[blk_id] = key_cache[blk_id].mean(0)
-torch.cuda.synchronize()
-print("normal mean spent: ", time.time() - begin)
+    rng = np.random.default_rng()
+    range_n = np.arange(N)
+    repre_index = rng.choice(range_n, size=num_repre_blocks, replace=False)
+    repre_index = torch.from_numpy(repre_index).to(torch.int32).cuda()
 
-diff = (repre_cache2[block_table] - repre_cache[block_table]).abs()
-print("repre diff: ", diff.max())
+    start = time.perf_counter_ns()
+    esa_repre(key_cache, repre_cache, repre_index, repre_index)
+    torch.cuda.synchronize()
+    duration = time.perf_counter_ns() - start
+    print_green(f"{' '*4}[esa_repre] host API time: {duration / 1e6:.3f} ms")
+
+    start = time.perf_counter_ns()
+    for blk_id in repre_index:
+        repre_cache2[blk_id] = key_cache[blk_id].mean(0)
+    torch.cuda.synchronize()
+    duration = time.perf_counter_ns() - start
+    print_red(f"{' '*4}[naive_repre] host API time: {duration / 1e6:.3f} ms")
+
+    diff = (repre_cache2[repre_index] - repre_cache[repre_index]).abs()
+    print_blue(f"{' '*4}[esa_repre] repre diff: {diff.mean():.3f}(mean), {diff.max():.3f}(max)")
+    print("")

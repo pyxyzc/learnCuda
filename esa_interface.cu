@@ -60,7 +60,6 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
                 auto q_tensor = query_list[i].cast<torch::Tensor>();
                 Q_ptrs[i] = q_tensor.data_ptr<float>();
             }
-            printf("is float32\n");
             size_t bytes = numThreads.x * sizeof(float);
             retrieval_kernel_fp32<<<numBlocks, numThreads, bytes>>>(Q_ptrs, repre_cache.data_ptr<float>(), score.data_ptr<float>(), repre_index.data_ptr<int>(), q_index.data_ptr<int>(), dim, s);
             CUDA_CHECK(cudaFree(Q_ptrs));
@@ -84,7 +83,6 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
                 auto q_tensor = query_list[i].cast<torch::Tensor>();
                 Q_ptrs[i] = reinterpret_cast<__half*>(q_tensor.data_ptr());
             }
-            printf("is float16\n");
             size_t bytes = numThreads.x * sizeof(float);
             retrieval_kernel_fp16<<<numBlocks, numThreads, bytes>>>(Q_ptrs,
                     reinterpret_cast<__half*>(repre_cache.data_ptr()),
@@ -115,7 +113,6 @@ void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
                 auto q_tensor = query_list[i].cast<torch::Tensor>();
                 Q_ptrs[i] = reinterpret_cast<__nv_bfloat16*>(q_tensor.data_ptr());
             }
-            printf("is bfloat16\n");
             size_t bytes = numThreads.x * sizeof(float);
             retrieval_kernel_bf16<<<numBlocks, numThreads, bytes>>>(Q_ptrs,
                     reinterpret_cast<__nv_bfloat16*>(repre_cache.data_ptr()),
