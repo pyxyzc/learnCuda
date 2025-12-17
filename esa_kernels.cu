@@ -35,8 +35,7 @@ __global__ void extract_repre(const scalar_t *key_cache, scalar_t *repre_cache, 
  * @param batch_index: [S]
  */
 
-template <typename scalar_t>
-__global__ void retrieval_kernel(scalar_t **queries, scalar_t *__restrict__ repre_cache, scalar_t *__restrict__ score, int *__restrict__ block_table, int *__restrict__ batch_index, int num_q_heads, int num_k_heads, int dim, int S){
+__global__ void retrieval_kernel_fp16(__half **queries, __half *__restrict__ repre_cache, __half *__restrict__ score, int *__restrict__ block_table, int *__restrict__ batch_index, int num_q_heads, int num_k_heads, int dim, int S){
     if (blockIdx.x >= S){
         return;
     }
@@ -55,28 +54,125 @@ __global__ void retrieval_kernel(scalar_t **queries, scalar_t *__restrict__ repr
         for(int x = 0; x < num_tiles_x; ++x){
             int d = x * blockDim.x + threadIdx.x;
             if (q_head < num_q_heads && k_head < num_k_heads && d < dim){
-                scalar_t q_val = *(q_offset + q_head * dim + d);
-                scalar_t k_val = *(k_offset + k_head * dim + d);
-                sum += static_cast<float>(q_val) * static_cast<float>(k_val);
+                auto q_val = *(q_offset + q_head * dim + d);
+                auto k_val = *(k_offset + k_head * dim + d);
+                sum += __half2float(q_val) * __half2float(k_val);
             }
         }
     }
+    // printf("block_id: %d, threadIdx.y: %d, threadIdx.x: %d, sum: %f\n", block_table[blockIdx.x], threadIdx.y, threadIdx.x, sum);
+    // score[blockIdx.x * 32 * 32 + threadIdx.y * 32 + threadIdx.x] = __float2half(sum);
 
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
     int numWarps = ceildiv(blockDim.x * blockDim.y, warp_size);
     int warp_id = tid / numWarps;
     int lane_id = tid & (warp_size - 1);
 
-    float warp_sum = warpReduceSum<float>(sum);
+    auto warp_sum = warpReduceSum(sum);
     if(lane_id == 0){
         local_score[warp_id] = warp_sum;
     }
     __syncthreads();
     if(warp_id == 0){
         sum = lane_id < numWarps ? local_score[lane_id] : 0.0f;
-        sum = warpReduceSum<float>(sum);
+        sum = warpReduceSum(sum);
         if(lane_id == 0){
-            score[blockIdx.x] = static_cast<scalar_t>(sum);
+            score[blockIdx.x] = __float2half(sum);
+        }
+    }
+}
+
+
+__global__ void retrieval_kernel_fp32(float **queries, float *__restrict__ repre_cache, float *__restrict__ score, int *__restrict__ block_table, int *__restrict__ batch_index, int num_q_heads, int num_k_heads, int dim, int S){
+    if (blockIdx.x >= S){
+        return;
+    }
+    int warp_size = 32;
+    extern __shared__ float local_score[];
+    auto *q_offset = queries[batch_index[blockIdx.x]];
+    auto *k_offset = repre_cache + block_table[blockIdx.x] * num_k_heads * dim;
+    int num_tiles_y = ceildiv(num_q_heads, blockDim.y);
+    int num_tiles_x = ceildiv(dim, blockDim.x);
+    int gqa_size = num_q_heads / num_k_heads;
+
+    float sum = 0.0f;
+    for (int y = 0; y < num_tiles_y; ++y){
+        int q_head = y * blockDim.y + threadIdx.y;
+        int k_head = q_head / gqa_size;
+        for(int x = 0; x < num_tiles_x; ++x){
+            int d = x * blockDim.x + threadIdx.x;
+            if (q_head < num_q_heads && k_head < num_k_heads && d < dim){
+                auto q_val = *(q_offset + q_head * dim + d);
+                auto k_val = *(k_offset + k_head * dim + d);
+                sum += q_val * k_val;
+            }
+        }
+    }
+    // printf("block_id: %d, threadIdx.x: %d, threadIdx.y: %d, sum: %f\n", block_table[blockIdx.x], threadIdx.x, threadIdx.y, sum);
+    // score[blockIdx.x * 32 * 32 + threadIdx.y * 32 + threadIdx.x] = sum;
+
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    int numWarps = ceildiv(blockDim.x * blockDim.y, warp_size);
+    int warp_id = tid / numWarps;
+    int lane_id = tid & (warp_size - 1);
+
+    auto warp_sum = warpReduceSum(sum);
+    if(lane_id == 0){
+        local_score[warp_id] = warp_sum;
+    }
+    __syncthreads();
+    if(warp_id == 0){
+        sum = lane_id < numWarps ? local_score[lane_id] : 0.0f;
+        sum = warpReduceSum(sum);
+        if(lane_id == 0){
+            score[blockIdx.x] = sum;
+        }
+    }
+}
+
+__global__ void retrieval_kernel_bf16(__nv_bfloat16 **queries, __nv_bfloat16 *__restrict__ repre_cache, __nv_bfloat16 *__restrict__ score, int *__restrict__ block_table, int *__restrict__ batch_index, int num_q_heads, int num_k_heads, int dim, int S){
+    if (blockIdx.x >= S){
+        return;
+    }
+    int warp_size = 32;
+    extern __shared__ float local_score[];
+    auto *q_offset = queries[batch_index[blockIdx.x]];
+    auto *k_offset = repre_cache + block_table[blockIdx.x] * num_k_heads * dim;
+    int num_tiles_y = ceildiv(num_q_heads, blockDim.y);
+    int num_tiles_x = ceildiv(dim, blockDim.x);
+    int gqa_size = num_q_heads / num_k_heads;
+
+    float sum = 0.0f;
+    for (int y = 0; y < num_tiles_y; ++y){
+        int q_head = y * blockDim.y + threadIdx.y;
+        int k_head = q_head / gqa_size;
+        for(int x = 0; x < num_tiles_x; ++x){
+            int d = x * blockDim.x + threadIdx.x;
+            if (q_head < num_q_heads && k_head < num_k_heads && d < dim){
+                auto q_val = *(q_offset + q_head * dim + d);
+                auto k_val = *(k_offset + k_head * dim + d);
+                sum += __bfloat162float(q_val) * __bfloat162float(k_val);
+            }
+        }
+    }
+    // printf("block_id: %d, threadIdx.x: %d, threadIdx.y: %d, sum: %f\n", block_table[blockIdx.x], threadIdx.x, threadIdx.y, sum);
+    // score[blockIdx.x * 32 * 32 + threadIdx.y * 32 + threadIdx.x] = sum;
+
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    int numWarps = ceildiv(blockDim.x * blockDim.y, warp_size);
+    int warp_id = tid / numWarps;
+    int lane_id = tid & (warp_size - 1);
+
+    auto warp_sum = warpReduceSum(sum);
+    if(lane_id == 0){
+        local_score[warp_id] = warp_sum;
+    }
+    __syncthreads();
+    if(warp_id == 0){
+        sum = lane_id < numWarps ? local_score[lane_id] : 0.0f;
+        sum = warpReduceSum(sum);
+        if(lane_id == 0){
+            score[blockIdx.x] = __float2bfloat16(sum);
         }
     }
 }

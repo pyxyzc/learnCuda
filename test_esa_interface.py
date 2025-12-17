@@ -55,6 +55,7 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     repre_index = rng.choice(range_n, size=num_repre_blocks, replace=False)
     repre_index = torch.from_numpy(repre_index).to(torch.int32).cuda()
     q_index = torch.randint(0, batch_size, size = [num_repre_blocks], dtype = torch.int32).cuda()
+    # score = torch.zeros(num_repre_blocks, 32, 32, dtype = dtype).cuda()
     score = torch.zeros(num_repre_blocks, dtype = dtype).cuda()
     score_sorted = torch.zeros(num_repre_blocks, dtype = dtype).cuda()
     index = torch.cat([torch.arange(0, num_repre_blocks / batch_size, dtype=torch.int32) for _ in range(batch_size)]).cuda()
@@ -81,6 +82,7 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
 
     start = time.perf_counter_ns()
     esa_retrieval(Input, Output)
+    # score = score.view(-1, 1024).sum(-1)
     torch.cuda.synchronize()
     duration = time.perf_counter_ns() - start
     print_green(f"{' '*4}esa_retrieval host API time: {duration/1e6:.3f} ms")
@@ -100,9 +102,13 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     print_red(f"{' '*4}naive_retrieval host API time: {duration/1e6:.3f} ms")
 
     diff = (score - score_gt).abs()
-    print_blue(f"{' '*4}score diff: {diff.mean():.3f}(mean), {diff.max():.3f}(max)")
-    # diff_index = (index_sorted - index_gt).abs().to(torch.float32)
+    # print_blue(f"{' '*4}score diff: {diff.mean():.3f}(mean), {diff.max():.3f}(max)")
+    print(f"score: {score}")
+    print(f"score_gt: {score_gt}")
+    diff_index = (index_sorted - index_gt).abs().to(torch.float32)
     # print_blue(f"{' '*4}index diff: {diff_index.mean():.3f}(mean), {diff_index.max():.3f}(max)")
+    print(f"index: {index_sorted}")
+    print(f"index_gt: {index_gt}")
     print("")
 
 
@@ -141,4 +147,4 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
 #     print_blue(f"{' '*4}[esa_repre] repre diff: {diff.mean():.3f}(mean), {diff.max():.3f}(max)")
 #     print("")
 if __name__ == "__main__":
-    test_esa_retrieval(1, 52, 40)
+    test_esa_retrieval(1, 100, 40)

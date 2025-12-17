@@ -30,8 +30,7 @@ namespace py = pybind11;
     } \
 } \
 
-template <typename scalar_t>
-__inline__ __device__ scalar_t warpReduceSum(scalar_t val)
+__inline__ __device__ float warpReduceSum(float val)
 {
     int warpSize = 32;
     unsigned mask = __activemask();          // ballot of *all* currently active threads
