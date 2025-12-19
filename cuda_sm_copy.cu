@@ -1,10 +1,4 @@
-#include <cstdint>
-#include <stdio.h>
-
-#define CUDA_TRANS_UNIT_SIZE (sizeof(uint4) * 2)
-#define CUDA_TRANS_BLOCK_NUMBER (32)
-#define CUDA_TRANS_BLOCK_SIZE (256)
-#define CUDA_TRANS_THREAD_NUMBER (CUDA_TRANS_BLOCK_NUMBER * CUDA_TRANS_BLOCK_SIZE)
+#include "cuda_sm_copy.h"
 
 inline __device__ void CudaCopyUnit(const uint8_t* __restrict__ src,
                                     volatile uint8_t* __restrict__ dst)
@@ -79,7 +73,8 @@ __global__ void CudaCopyKernel(const void* src, void* dst, size_t size)
 }
 
 
-int main(){
-    printf("CUDA_TRANS_UNIT_SIZE: %ld", CUDA_TRANS_UNIT_SIZE);
-    return 0;
+void esa_copy(torch::Tensor src, torch::Tensor dst, size_t size)
+{
+    CudaCopyKernel<<<CUDA_TRANS_BLOCK_NUMBER, CUDA_TRANS_BLOCK_SIZE>>>(
+        (const void*)src.data_ptr(), (void*)dst.data_ptr(), size);
 }

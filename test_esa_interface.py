@@ -46,10 +46,8 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     total_blocks = num_repre_blocks * batch_size
     N = total_blocks * 2
     num_k_heads = 8
-    query_list = []
-    dtype = torch.float32
-    for i in range(batch_size):
-        query_list.append(torch.rand(num_q_heads, dim, dtype=dtype).cuda())
+    dtype = torch.bfloat16
+    query = torch.randn(batch_size, num_q_heads, dim, dtype=dtype).cuda()
     repre_cache = torch.randn(N, num_k_heads, dim, dtype = dtype).cuda()
     rng = np.random.default_rng()
     range_n = np.arange(N)
@@ -66,17 +64,18 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
         batch_offset.append(i * num_repre_blocks)
     batch_offset = torch.tensor(batch_offset, dtype=torch.int32).cuda()
     workspace = torch.zeros(10000, dtype=torch.int32).cuda()
-    ptrs_host = torch.tensor([q.data_ptr() for q in query_list],
-                             dtype=torch.int64, pin_memory=True)
-    ptrs_dev = torch.zeros(batch_size, dtype=torch.int64, device="cuda")
-    size = ptrs_host.numel() * ptrs_host.element_size()
-    esa_copy(ptrs_host, ptrs_dev, size)
-    print("ptrs: ", ptrs_dev, ptrs_host)
+    # ptrs_host = torch.tensor([q.data_ptr() for q in query_list],
+    #                          dtype=torch.int64, pin_memory=True)
+    # ptrs_dev = torch.zeros(batch_size, dtype=torch.int64, device="cuda")
+    # size = ptrs_host.numel() * ptrs_host.element_size()
+    # esa_copy(ptrs_host, ptrs_dev, size)
+    # print("ptrs: ", ptrs_dev, ptrs_host)
 
     Input = esa_lib.RetrievalInputTensor()
     Input.num_q_heads = num_q_heads;
     Input.batch_size = batch_size;
-    Input.q_ptrs = ptrs_dev
+    Input.q_ptrs = query
+    # Input.q_ptrs = ptrs_dev
     Input.repre_cache = repre_cache
     Input.q_index = q_index
     Input.repre_index = repre_index
@@ -98,10 +97,9 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     print_red(f"{' '*4}batch_offset {batch_offset}")
 
     def naive_retrieval():
-        query = torch.stack(query_list)
-        query = query[q_index]
+        query_batched = query[q_index]
         key = torch.repeat_interleave(repre_cache[repre_index], num_q_heads//num_k_heads, dim=1)
-        score_gt = (query * key).sum(-1).sum(-1)
+        score_gt = (query_batched * key).sum(-1).sum(-1)
         index_gt = torch.cat([ score_gt[s:t].argsort(descending=True) for s,t in zip(batch_offset[:-1], batch_offset[1:]) ])
         return score_gt, index_gt
 
@@ -160,7 +158,7 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
 
 
 if __name__ == "__main__":
-    test_esa_retrieval(10, 50, 40)
+    test_esa_retrieval(1, 52, 40)
     # a = torch.randn(1000, 1000, dtype=torch.float32, device="cuda")
     # b = torch.randn(1000, 1000, dtype=torch.float32, device="cuda")
     # c = torch.randn(1000, 1000, dtype=torch.float32, device="cuda")

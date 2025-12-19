@@ -1,18 +1,31 @@
-#include "esa_utils.h"
+#include "esa_kernels.h"
 
+__inline__ __device__ float warpReduceSum(float val)
+{
+    int warpSize = 32;
+    unsigned mask = __activemask();          // ballot of *all* currently active threads
+    for (int offset = warpSize/2; offset > 0; offset /= 2)
+        val += __shfl_down_sync(mask, val, offset);
+    return val;                              // only lane 0 holds the total
+}
+
+constexpr __host__ __device__
+int ceildiv(int a, int b) {
+    return (a + b - 1) / b;
+}
 /**
- * This kernel performs: repre_cache[repre_block_table[i]] = mean( key_cache[key_block_table[i]], 0 )
+ * This kernel performs: repre_cache[repre_repre_index[i]] = mean( key_cache[key_repre_index[i]], 0 )
  *
  * @param key_cache: [N, block_size, dim]
  * @param repre_cache: [N, dim]
- * @param key_block_table: [S]
- * @param repre_block_table: [S]
+ * @param key_repre_index: [S]
+ * @param repre_repre_index: [S]
  */
 template <typename scalar_t>
-__global__ void extract_repre(const scalar_t *key_cache, scalar_t *repre_cache, const int *key_block_table, const int *repre_block_table, int block_size, int dim) {
+__global__ void extract_repre(const scalar_t *key_cache, scalar_t *repre_cache, const int *key_repre_index, const int *repre_index, int block_size, int dim) {
     int idx = blockIdx.x;
-    int block_id = key_block_table[idx];
-    int block_id_2 = repre_block_table[idx];
+    int block_id = key_repre_index[idx];
+    int block_id_2 = repre_index[idx];
     const scalar_t* key_ptr = key_cache + block_id * block_size * dim;
     scalar_t* repre_ptr = repre_cache + block_id_2 * dim;
     int d = threadIdx.x;
@@ -26,23 +39,23 @@ __global__ void extract_repre(const scalar_t *key_cache, scalar_t *repre_cache, 
 }
 
 /**
- * This kernel performs: score[i] = queries[batch_index[i]] * repre_cache[block_table[i]]
+ * This kernel performs: score[i] = queries[query_index[i]] * repre_cache[repre_index[i]]
  *
  * @param queries: a list of tensors. { batch_size * [num_q_heads, dim] }
  * @param repre_cache: [N, num_k_heads, dim]
  * @param score: [S]
- * @param block_table: [S]
- * @param batch_index: [S]
+ * @param repre_index: [S]
+ * @param query_index: [S]
  */
 
-__global__ void retrieval_kernel_fp16(__half **queries, __half *__restrict__ repre_cache, __half *__restrict__ score, int *__restrict__ block_table, int *__restrict__ batch_index, int num_q_heads, int num_k_heads, int dim, int S){
+__global__ void retrieval_kernel_fp16(__half *__restrict__ queries, __half *__restrict__ repre_cache, __half *__restrict__ score, int *__restrict__ repre_index, int *__restrict__ query_index, int num_q_heads, int num_k_heads, int dim, int S){
     if (blockIdx.x >= S){
         return;
     }
     int warp_size = 32;
     extern __shared__ float local_score[];
-    auto *q_offset = queries[batch_index[blockIdx.x]];
-    auto *k_offset = repre_cache + block_table[blockIdx.x] * num_k_heads * dim;
+    auto *q_offset = queries + query_index[blockIdx.x] * num_q_heads * dim;
+    auto *k_offset = repre_cache + repre_index[blockIdx.x] * num_k_heads * dim;
     int num_tiles_y = ceildiv(num_q_heads, blockDim.y);
     int num_tiles_x = ceildiv(dim, blockDim.x);
     int gqa_size = num_q_heads / num_k_heads;
@@ -60,8 +73,6 @@ __global__ void retrieval_kernel_fp16(__half **queries, __half *__restrict__ rep
             }
         }
     }
-    // printf("block_id: %d, threadIdx.y: %d, threadIdx.x: %d, sum: %f\n", block_table[blockIdx.x], threadIdx.y, threadIdx.x, sum);
-    // score[blockIdx.x * 32 * 32 + threadIdx.y * 32 + threadIdx.x] = __float2half(sum);
 
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
     int numWarps = ceildiv(blockDim.x * blockDim.y, warp_size);
@@ -83,14 +94,14 @@ __global__ void retrieval_kernel_fp16(__half **queries, __half *__restrict__ rep
 }
 
 
-__global__ void retrieval_kernel_fp32(float **queries, float *__restrict__ repre_cache, float *__restrict__ score, int *__restrict__ block_table, int *__restrict__ batch_index, int num_q_heads, int num_k_heads, int dim, int S){
+__global__ void retrieval_kernel_fp32(float *__restrict__ queries, float *__restrict__ repre_cache, float *__restrict__ score, int *__restrict__ repre_index, int *__restrict__ query_index, int num_q_heads, int num_k_heads, int dim, int S){
     if (blockIdx.x >= S){
         return;
     }
     int warp_size = 32;
     extern __shared__ float local_score[];
-    auto *q_offset = queries[batch_index[blockIdx.x]];
-    auto *k_offset = repre_cache + block_table[blockIdx.x] * num_k_heads * dim;
+    auto *q_offset = queries + query_index[blockIdx.x] * num_q_heads * dim;
+    auto *k_offset = repre_cache + repre_index[blockIdx.x] * num_k_heads * dim;
     int num_tiles_y = ceildiv(num_q_heads, blockDim.y);
     int num_tiles_x = ceildiv(dim, blockDim.x);
     int gqa_size = num_q_heads / num_k_heads;
@@ -108,8 +119,6 @@ __global__ void retrieval_kernel_fp32(float **queries, float *__restrict__ repre
             }
         }
     }
-    // printf("block_id: %d, threadIdx.x: %d, threadIdx.y: %d, sum: %f\n", block_table[blockIdx.x], threadIdx.x, threadIdx.y, sum);
-    // score[blockIdx.x * 32 * 32 + threadIdx.y * 32 + threadIdx.x] = sum;
 
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
     int numWarps = ceildiv(blockDim.x * blockDim.y, warp_size);
@@ -130,14 +139,14 @@ __global__ void retrieval_kernel_fp32(float **queries, float *__restrict__ repre
     }
 }
 
-__global__ void retrieval_kernel_bf16(__nv_bfloat16 **queries, __nv_bfloat16 *__restrict__ repre_cache, __nv_bfloat16 *__restrict__ score, int *__restrict__ block_table, int *__restrict__ batch_index, int num_q_heads, int num_k_heads, int dim, int S){
+__global__ void retrieval_kernel_bf16(__nv_bfloat16 *__restrict__ queries, __nv_bfloat16 *__restrict__ repre_cache, __nv_bfloat16 *__restrict__ score, int *__restrict__ repre_index, int *__restrict__ query_index, int num_q_heads, int num_k_heads, int dim, int S){
     if (blockIdx.x >= S){
         return;
     }
     int warp_size = 32;
     extern __shared__ float local_score[];
-    auto *q_offset = queries[batch_index[blockIdx.x]];
-    auto *k_offset = repre_cache + block_table[blockIdx.x] * num_k_heads * dim;
+    auto *q_offset = queries + query_index[blockIdx.x] * num_q_heads * dim;
+    auto *k_offset = repre_cache + repre_index[blockIdx.x] * num_k_heads * dim;
     int num_tiles_y = ceildiv(num_q_heads, blockDim.y);
     int num_tiles_x = ceildiv(dim, blockDim.x);
     int gqa_size = num_q_heads / num_k_heads;
@@ -155,8 +164,6 @@ __global__ void retrieval_kernel_bf16(__nv_bfloat16 **queries, __nv_bfloat16 *__
             }
         }
     }
-    // printf("block_id: %d, threadIdx.x: %d, threadIdx.y: %d, sum: %f\n", block_table[blockIdx.x], threadIdx.x, threadIdx.y, sum);
-    // score[blockIdx.x * 32 * 32 + threadIdx.y * 32 + threadIdx.x] = sum;
 
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
     int numWarps = ceildiv(blockDim.x * blockDim.y, warp_size);
@@ -175,4 +182,123 @@ __global__ void retrieval_kernel_bf16(__nv_bfloat16 **queries, __nv_bfloat16 *__
             score[blockIdx.x] = __float2bfloat16(sum);
         }
     }
+}
+
+
+void esa_repre(torch::Tensor key_cache, torch::Tensor repre_cache, torch::Tensor block_table, torch::Tensor repre_table){
+    int block_size = key_cache.size(1);
+    int dim = repre_cache.size(-1);
+    int threads = dim;
+    int blocks = block_table.size(0);
+    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, key_cache.scalar_type(), "esa_repre_cuda", ([&] {
+                extract_repre<scalar_t><<<blocks, threads>>>(
+                        key_cache.data_ptr<scalar_t>(),
+                        repre_cache.data_ptr<scalar_t>(),
+                        block_table.data_ptr<int>(),
+                        repre_table.data_ptr<int>(),
+                        block_size,
+                        dim);
+                }));
+}
+
+void esa_topk(torch::Tensor score, torch::Tensor index, torch::Tensor offsets, torch::Tensor score_out, torch::Tensor index_out, torch::Tensor workspace){
+    void* temp_workspace = nullptr;
+    size_t temp_bytes = 0;
+    size_t B = offsets.size(0) - 1;
+    size_t total = score.size(0);
+    cub::DeviceSegmentedRadixSort::SortPairsDescending(
+            temp_workspace, temp_bytes,
+            score.data_ptr<float>(),  score_out.data_ptr<float>(),
+            index.data_ptr<int>(), index_out.data_ptr<int>(),
+            total, B, offsets.data_ptr<int>(), offsets.data_ptr<int>() + 1);
+    // NOTE: Don't use malloc, just reuse the workspace, but the first call of
+    // SortPairsDescending is necesssary to determine the workspace size.
+    // CUDA_CHECK(cudaMalloc(&temp_workspace, temp_bytes));
+    temp_workspace = workspace.data_ptr<int>();
+    cub::DeviceSegmentedRadixSort::SortPairsDescending(
+            temp_workspace, temp_bytes,
+            score.data_ptr<float>(),  score_out.data_ptr<float>(),
+            index.data_ptr<int>(), index_out.data_ptr<int>(),
+            total, B, offsets.data_ptr<int>(), offsets.data_ptr<int>() + 1);
+}
+
+void esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
+    auto q_ptrs = input.q_ptrs;
+    auto repre_cache = input.repre_cache;
+    auto q_index = input.q_index;
+    auto repre_index = input.repre_index;
+    auto batch_offset = input.batch_offset;
+    auto workspace = input.workspace;
+    auto num_q_heads = input.num_q_heads;
+
+    auto score = output.score;
+    auto score_sorted = output.score_sorted;
+    auto index_ranged = output.index_ranged;
+    auto index_sorted = output.index_sorted;
+
+    int s = repre_index.size(0);
+    auto num_k_heads = repre_cache.size(1);
+    int dim = repre_cache.size(2);
+    int batch = input.batch_size;
+    printf("blocks: %d, num_k_heads: %d, num_q_heads: %d, batch: %d, dim: %d\n", s, num_k_heads, num_q_heads, batch, dim);
+
+    dim3 numBlocks = {(unsigned int)(s)};
+    dim3 numThreads = {32, 32};
+    int numWarps = ceildiv(numThreads.x * numThreads.y, 32);
+    size_t bytes = numWarps * sizeof(float);
+    AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, repre_cache.scalar_type(), "esa_retrieval_cuda", ([&] {
+                if constexpr (std::is_same_v<scalar_t, float>) {
+                retrieval_kernel_fp32<<<numBlocks, numThreads, bytes>>>(reinterpret_cast<float*>(q_ptrs.data_ptr()),
+                        reinterpret_cast<float*>(repre_cache.data_ptr()), reinterpret_cast<float*>(score.data_ptr()), repre_index.data_ptr<int>(), q_index.data_ptr<int>(), num_q_heads, num_k_heads, dim, s);
+                // void* temp_workspace = nullptr;
+                // size_t temp_bytes = 0;
+                // cub::DeviceSegmentedRadixSort::SortPairsDescending(
+                //         temp_workspace, temp_bytes,
+                //         score.data_ptr<float>(),  score_sorted.data_ptr<float>(),
+                //         index_ranged.data_ptr<int>(), index_sorted.data_ptr<int>(),
+                //         s, batch, batch_offset.data_ptr<int>(), batch_offset.data_ptr<int>() + 1);
+                // temp_workspace = workspace.data_ptr<int>();
+                // cub::DeviceSegmentedRadixSort::SortPairsDescending(
+                //         temp_workspace, temp_bytes,
+                //         score.data_ptr<float>(),  score_sorted.data_ptr<float>(),
+                //         index_ranged.data_ptr<int>(), index_sorted.data_ptr<int>(),
+                //         s, batch, batch_offset.data_ptr<int>(), batch_offset.data_ptr<int>() + 1);
+                } else if constexpr (std::is_same_v<scalar_t, at::Half>) {
+                retrieval_kernel_fp16<<<numBlocks, numThreads, bytes>>>(reinterpret_cast<__half*>(q_ptrs.data_ptr()),
+                        reinterpret_cast<__half*>(repre_cache.data_ptr()), reinterpret_cast<__half*>(score.data_ptr()), repre_index.data_ptr<int>(), q_index.data_ptr<int>(), num_q_heads, num_k_heads, dim, s);
+                void* temp_workspace = nullptr;
+                size_t temp_bytes = 0;
+                cub::DeviceSegmentedRadixSort::SortPairsDescending(
+                        temp_workspace, temp_bytes,
+                        reinterpret_cast<__half*>(score.data_ptr()),
+                        reinterpret_cast<__half*>(score_sorted.data_ptr()),
+                        index_ranged.data_ptr<int>(), index_sorted.data_ptr<int>(),
+                        s, batch, batch_offset.data_ptr<int>(), batch_offset.data_ptr<int>() + 1);
+                temp_workspace = workspace.data_ptr<int>();
+                cub::DeviceSegmentedRadixSort::SortPairsDescending(
+                        temp_workspace, temp_bytes,
+                        reinterpret_cast<__half*>(score.data_ptr()),
+                        reinterpret_cast<__half*>(score_sorted.data_ptr()),
+                        index_ranged.data_ptr<int>(), index_sorted.data_ptr<int>(),
+                        s, batch, batch_offset.data_ptr<int>(), batch_offset.data_ptr<int>() + 1);
+                } else if constexpr (std::is_same_v<scalar_t, at::BFloat16>) {
+                    retrieval_kernel_bf16<<<numBlocks, numThreads, bytes>>>(reinterpret_cast<__nv_bfloat16*>(q_ptrs.data_ptr()),
+                            reinterpret_cast<__nv_bfloat16*>(repre_cache.data_ptr()), reinterpret_cast<__nv_bfloat16*>(score.data_ptr()), repre_index.data_ptr<int>(), q_index.data_ptr<int>(), num_q_heads, num_k_heads, dim, s);
+                    void* temp_workspace = nullptr;
+                    size_t temp_bytes = 0;
+                    cub::DeviceSegmentedRadixSort::SortPairsDescending(
+                            temp_workspace, temp_bytes,
+                            reinterpret_cast<__nv_bfloat16*>(score.data_ptr()),
+                            reinterpret_cast<__nv_bfloat16*>(score_sorted.data_ptr()),
+                            index_ranged.data_ptr<int>(), index_sorted.data_ptr<int>(),
+                            s, batch, batch_offset.data_ptr<int>(), batch_offset.data_ptr<int>() + 1);
+                    temp_workspace = workspace.data_ptr<int>();
+                    cub::DeviceSegmentedRadixSort::SortPairsDescending(
+                            temp_workspace, temp_bytes,
+                            reinterpret_cast<__nv_bfloat16*>(score.data_ptr()),
+                            reinterpret_cast<__nv_bfloat16*>(score_sorted.data_ptr()),
+                            index_ranged.data_ptr<int>(), index_sorted.data_ptr<int>(),
+                            s, batch, batch_offset.data_ptr<int>(), batch_offset.data_ptr<int>() + 1);
+                }
+    }));
 }

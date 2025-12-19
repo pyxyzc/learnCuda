@@ -1,0 +1,27 @@
+cmake_minimum_required(VERSION 4.0)
+
+set(CUDA_ROOT "/usr/local/cuda/" CACHE PATH "Path to CUDA root directory")
+set(CMAKE_CUDA_COMPILER ${CUDA_ROOT}/bin/nvcc)
+set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 90)
+enable_language(CUDA)
+add_library(kernel OBJECT esa_kernels.cu)
+target_compile_options(kernel PRIVATE
+    --diag-suppress=128 --diag-suppress=2417 --diag-suppress=2597
+    -Wall -fPIC
+)
+if(DEFINED ENV{MY_INCLUDE_PATH})
+    message(STATUS "Adding include path from MY_INCLUDE_PATH: $ENV{MY_INCLUDE_PATH}")
+    # split colon‐separated paths into a CMake list
+    string(REPLACE ":" ";" MY_INCLUDE_PATH_LIST "$ENV{MY_INCLUDE_PATH}")
+    include_directories(${MY_INCLUDE_PATH_LIST})
+endif()
+include_directories(${CUDA_ROOT}/include)
+
+find_package(pybind11 REQUIRED)
+pybind11_add_module(esa_interface esa_interface.cu)
+target_link_directories(esa_interface PUBLIC ${CUDA_ROOT}/lib64)
+target_link_libraries(esa_interface PUBLIC
+    cudart
+    nvidia-ml
+    kernel
+)

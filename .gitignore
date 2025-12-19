@@ -1,3 +1,4 @@
+build/
 .aider*
 make.log
 copy_compute_test

@@ -1,25 +1,36 @@
-cmake_minimum_required(VERSION 4.0)
+cmake_minimum_required(VERSION 3.18)
+project(esa LANGUAGES CXX CUDA)
 
-set(CUDA_ROOT "/usr/local/cuda/" CACHE PATH "Path to CUDA root directory")
-set(CMAKE_CUDA_COMPILER ${CUDA_ROOT}/bin/nvcc)
-set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 90)
-enable_language(CUDA)
-add_library(kernel OBJECT retrieval_kernel.cu)
-target_compile_options(kernel PRIVATE
-    --diag-suppress=128 --diag-suppress=2417 --diag-suppress=2597
-    -Wall -fPIC
+# ---------- 1.  locate Python + pybind11 ------------------
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
+list(APPEND CMAKE_PREFIX_PATH ${Python_SITELIB}/pybind11)
+find_package(pybind11 REQUIRED)
+
+if(DEFINED ENV{MY_INCLUDE_PATH})
+    message(STATUS "Adding include path from MY_INCLUDE_PATH: $ENV{MY_INCLUDE_PATH}")
+    # split colon‐separated paths into a CMake list
+    string(REPLACE ":" ";" MY_INCLUDE_PATH_LIST "$ENV{MY_INCLUDE_PATH}")
+    include_directories(${MY_INCLUDE_PATH_LIST})
+endif()
+
+
+# ---------- 2.  create the shared module ------------------
+# pybind11_add_module already adds -fPIC, correct suffix, etc.
+pybind11_add_module(esa
+    esa_interface.cu      # contains PYBIND11_MODULE(esa, m){ ... }
+    esa_kernels.cu
+    cuda_sm_copy.cu
 )
-add_library(trans STATIC
-    cuda_device.cc
-    cuda_buffer.cc
-    cuda_stream.cc
-    cuda_sm_stream.cc
+
+# ---------- 3.  compile flags -----------------------------
+target_compile_features(esa PRIVATE cxx_std_17)
+set_target_properties(esa PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON   # needed if kernels call each other
+    POSITION_INDEPENDENT_CODE ON    # redundant but explicit
 )
-target_include_directories(trans PUBLIC ${CUDA_ROOT}/include)
-target_link_directories(trans PUBLIC ${CUDA_ROOT}/lib64)
-target_link_libraries(trans PUBLIC
-    fmt
-    cudart
-    nvidia-ml
-    kernel
-)
+
+# ---------- 4.  include headers ----------------------------
+target_include_directories(esa PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# ---------- 5.  link libraries -----------------------------
+target_link_libraries(esa PRIVATE ${CUDA_LIBRARIES})   # libcudart
