@@ -16,13 +16,13 @@ __global__ void add_kernel(float** in, float* out, int n, int batch)
 }
 
 
-void launch(std::vector<torch::Tensor> tensors, torch::Tensor out)
+void launch(std::vector<torch::Tensor> in_tensors, torch::Tensor out)
 {
-    int n = tensors[0].numel();
-    int batch = tensors.size();
+    int n = in_tensors[0].numel();
+    int batch = in_tensors.size();
     std::vector<float*> ptrs = {};
     for (int i = 0; i < batch; ++i){
-        ptrs.push_back(reinterpret_cast<float*>(tensors[i].data_ptr()));
+        ptrs.push_back(reinterpret_cast<float*>(in_tensors[i].data_ptr()));
     }
     dim3 numThreads = {1024};
     dim3 numBlocks = {(size_t)((n + 1024 - 1) / 1024)};
