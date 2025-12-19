@@ -1,26 +1,33 @@
 cmake_minimum_required(VERSION 3.18)
 project(esa LANGUAGES CXX CUDA)
-
-# ---------- 1.  locate Python + pybind11 ------------------
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
-list(APPEND CMAKE_PREFIX_PATH ${Python_SITELIB}/pybind11)
 find_package(pybind11 REQUIRED)
 find_package(Torch REQUIRED)   # provides Torch::torch
-
 if(DEFINED ENV{MY_INCLUDE_PATH})
     message(STATUS "Adding include path from MY_INCLUDE_PATH: $ENV{MY_INCLUDE_PATH}")
     # split colon‐separated paths into a CMake list
     string(REPLACE ":" ";" MY_INCLUDE_PATH_LIST "$ENV{MY_INCLUDE_PATH}")
     include_directories(${MY_INCLUDE_PATH_LIST})
 endif()
+set(CUDA_ROOT "/usr/local/cuda/" CACHE PATH "Path to CUDA root directory")
+set(CMAKE_CUDA_COMPILER ${CUDA_ROOT}/bin/nvcc)
+set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 90)
+enable_language(CUDA)
+add_library(esa_kernels OBJECT esa_kernels.cu)
+add_library(esa_copy_kernels OBJECT cuda_sm_copy.cu)
+target_compile_options(esa_kernels PRIVATE
+    --diag-suppress=128 --diag-suppress=2417 --diag-suppress=2597
+    -Wall -fPIC
+)
+target_compile_options(esa_copy_kernels PRIVATE
+    --diag-suppress=128 --diag-suppress=2417 --diag-suppress=2597
+    -Wall -fPIC
+)
 
 
 # ---------- 2.  create the shared module ------------------
-# pybind11_add_module already adds -fPIC, correct suffix, etc.
-pybind11_add_module(esa
+pybind11_add_module(esa_interface
     esa_interface.cu      # contains PYBIND11_MODULE(esa, m){ ... }
-    esa_kernels.cu
-    cuda_sm_copy.cu
 )
 
 # ---------- 3.  compile flags -----------------------------
