@@ -6,38 +6,29 @@
 #include <thrust/copy.h>
 #include <thrust/count.h>
 #include <thrust/execution_policy.h>
+#include <thrust/binary_search.h>
+#include <thrust/sort.h>
 #include <type_traits>
 #include <math.h>
 
 template <typename T>
-__device__ __forceinline__ bool eq_eps(T a, T b, double eps) {
-    if constexpr (std::is_floating_point<T>::value) {
-        return fabs((double)a - (double)b) <= eps;
-    } else {
-        return a == b;
+__global__ void add_scalar_kernel(const T* __restrict__ in, T* __restrict__ out, int64_t N, T alpha) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+    for (int64_t i = idx; i < N; i += stride) {
+        out[i] = in[i] + alpha;
     }
 }
 
-template <typename scalar_t>
-__global__ void mark_matches_kernel(
-    const scalar_t* __restrict__ A, int64_t NA,
-    const scalar_t* __restrict__ B, int64_t NB,
-    double eps,
-    uint8_t* __restrict__ matchA)
-{
+template <typename IndexT>
+__global__ void mark_from_bounds(const IndexT* __restrict__ lower,
+                                 const IndexT* __restrict__ upper,
+                                 int64_t N,
+                                 uint8_t* __restrict__ out) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
-
-    for (int64_t i = idx; i < NA; i += stride) {
-        scalar_t a = A[i];
-        uint8_t matched = 0;
-        for (int64_t j = 0; j < NB; ++j) {
-            if (eq_eps<scalar_t>(a, B[j], eps)) {
-                matched = 1;
-                break;
-            }
-        }
-        matchA[i] = matched;
+    for (int64_t i = idx; i < N; i += stride) {
+        out[i] = (upper[i] > lower[i]) ? 1 : 0;
     }
 }
 
@@ -71,6 +62,8 @@ std::tuple<at::Tensor, at::Tensor> diff_two_map_cuda(
     const int64_t N = old_values.size(0);
     const int64_t M = new_values.size(0);
 
+    auto policy = thrust::cuda::par.on(stream);
+
     auto byte_opts = old_values.options().dtype(at::kByte);
     at::Tensor old_match = at::empty({N}, byte_opts);
     at::Tensor new_match = at::empty({M}, byte_opts);
@@ -79,50 +72,226 @@ std::tuple<at::Tensor, at::Tensor> diff_two_map_cuda(
     const int blocks_old = std::min<int64_t>( (N + threads - 1) / threads, 4096 );
     const int blocks_new = std::min<int64_t>( (M + threads - 1) / threads, 4096 );
 
-    // Launch marking kernels
+    // Use sorting + batched binary search to compute membership masks in O((N+M)log(N+M))
     switch (old_values.scalar_type()) {
         case at::kFloat: {
-            const float* old_p = old_values.data_ptr<float>();
-            const float* new_p = new_values.data_ptr<float>();
-            uint8_t* old_m = old_match.data_ptr<uint8_t>();
-            uint8_t* new_m = new_match.data_ptr<uint8_t>();
-            mark_matches_kernel<float><<<blocks_old, threads, 0, stream>>>(
-                old_p, N, new_p, M, eps, old_m);
-            mark_matches_kernel<float><<<blocks_new, threads, 0, stream>>>(
-                new_p, M, old_p, N, eps, new_m);
+            using T = float;
+            // Sort copies for search
+            at::Tensor new_sorted = new_values.clone();
+            thrust::sort(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M);
+            at::Tensor old_sorted = old_values.clone();
+            thrust::sort(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N);
+
+            // For old_values vs new_sorted
+            at::Tensor old_minus = at::empty_like(old_values);
+            at::Tensor old_plus  = at::empty_like(old_values);
+            add_scalar_kernel<T><<<blocks_old, threads, 0, stream>>>(
+                old_values.data_ptr<T>(), old_minus.data_ptr<T>(), N, -static_cast<T>(eps));
+            add_scalar_kernel<T><<<blocks_old, threads, 0, stream>>>(
+                old_values.data_ptr<T>(), old_plus.data_ptr<T>(), N, static_cast<T>(eps));
+            at::Tensor lower_old = at::empty({N}, keys.options().dtype(at::kLong));
+            at::Tensor upper_old = at::empty({N}, keys.options().dtype(at::kLong));
+            thrust::lower_bound(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(old_minus.data_ptr<T>()),
+                thrust::device_pointer_cast(old_minus.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(lower_old.data_ptr<int64_t>()));
+            thrust::upper_bound(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(old_plus.data_ptr<T>()),
+                thrust::device_pointer_cast(old_plus.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(upper_old.data_ptr<int64_t>()));
+            mark_from_bounds<int64_t><<<blocks_old, threads, 0, stream>>>(
+                lower_old.data_ptr<int64_t>(), upper_old.data_ptr<int64_t>(), N, old_match.data_ptr<uint8_t>());
+
+            // For new_values vs old_sorted
+            at::Tensor new_minus = at::empty_like(new_values);
+            at::Tensor new_plus  = at::empty_like(new_values);
+            add_scalar_kernel<T><<<blocks_new, threads, 0, stream>>>(
+                new_values.data_ptr<T>(), new_minus.data_ptr<T>(), M, -static_cast<T>(eps));
+            add_scalar_kernel<T><<<blocks_new, threads, 0, stream>>>(
+                new_values.data_ptr<T>(), new_plus.data_ptr<T>(), M, static_cast<T>(eps));
+            at::Tensor lower_new = at::empty({M}, keys.options().dtype(at::kLong));
+            at::Tensor upper_new = at::empty({M}, keys.options().dtype(at::kLong));
+            thrust::lower_bound(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(new_minus.data_ptr<T>()),
+                thrust::device_pointer_cast(new_minus.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(lower_new.data_ptr<int64_t>()));
+            thrust::upper_bound(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(new_plus.data_ptr<T>()),
+                thrust::device_pointer_cast(new_plus.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(upper_new.data_ptr<int64_t>()));
+            mark_from_bounds<int64_t><<<blocks_new, threads, 0, stream>>>(
+                lower_new.data_ptr<int64_t>(), upper_new.data_ptr<int64_t>(), M, new_match.data_ptr<uint8_t>());
             break;
         }
         case at::kDouble: {
-            const double* old_p = old_values.data_ptr<double>();
-            const double* new_p = new_values.data_ptr<double>();
-            uint8_t* old_m = old_match.data_ptr<uint8_t>();
-            uint8_t* new_m = new_match.data_ptr<uint8_t>();
-            mark_matches_kernel<double><<<blocks_old, threads, 0, stream>>>(
-                old_p, N, new_p, M, eps, old_m);
-            mark_matches_kernel<double><<<blocks_new, threads, 0, stream>>>(
-                new_p, M, old_p, N, eps, new_m);
+            using T = double;
+            // Sort copies for search
+            at::Tensor new_sorted = new_values.clone();
+            thrust::sort(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M);
+            at::Tensor old_sorted = old_values.clone();
+            thrust::sort(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N);
+
+            // For old_values vs new_sorted
+            at::Tensor old_minus = at::empty_like(old_values);
+            at::Tensor old_plus  = at::empty_like(old_values);
+            add_scalar_kernel<T><<<blocks_old, threads, 0, stream>>>(
+                old_values.data_ptr<T>(), old_minus.data_ptr<T>(), N, -static_cast<T>(eps));
+            add_scalar_kernel<T><<<blocks_old, threads, 0, stream>>>(
+                old_values.data_ptr<T>(), old_plus.data_ptr<T>(), N, static_cast<T>(eps));
+            at::Tensor lower_old = at::empty({N}, keys.options().dtype(at::kLong));
+            at::Tensor upper_old = at::empty({N}, keys.options().dtype(at::kLong));
+            thrust::lower_bound(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(old_minus.data_ptr<T>()),
+                thrust::device_pointer_cast(old_minus.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(lower_old.data_ptr<int64_t>()));
+            thrust::upper_bound(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(old_plus.data_ptr<T>()),
+                thrust::device_pointer_cast(old_plus.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(upper_old.data_ptr<int64_t>()));
+            mark_from_bounds<int64_t><<<blocks_old, threads, 0, stream>>>(
+                lower_old.data_ptr<int64_t>(), upper_old.data_ptr<int64_t>(), N, old_match.data_ptr<uint8_t>());
+
+            // For new_values vs old_sorted
+            at::Tensor new_minus = at::empty_like(new_values);
+            at::Tensor new_plus  = at::empty_like(new_values);
+            add_scalar_kernel<T><<<blocks_new, threads, 0, stream>>>(
+                new_values.data_ptr<T>(), new_minus.data_ptr<T>(), M, -static_cast<T>(eps));
+            add_scalar_kernel<T><<<blocks_new, threads, 0, stream>>>(
+                new_values.data_ptr<T>(), new_plus.data_ptr<T>(), M, static_cast<T>(eps));
+            at::Tensor lower_new = at::empty({M}, keys.options().dtype(at::kLong));
+            at::Tensor upper_new = at::empty({M}, keys.options().dtype(at::kLong));
+            thrust::lower_bound(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(new_minus.data_ptr<T>()),
+                thrust::device_pointer_cast(new_minus.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(lower_new.data_ptr<int64_t>()));
+            thrust::upper_bound(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(new_plus.data_ptr<T>()),
+                thrust::device_pointer_cast(new_plus.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(upper_new.data_ptr<int64_t>()));
+            mark_from_bounds<int64_t><<<blocks_new, threads, 0, stream>>>(
+                lower_new.data_ptr<int64_t>(), upper_new.data_ptr<int64_t>(), M, new_match.data_ptr<uint8_t>());
             break;
         }
         case at::kInt: {
-            const int32_t* old_p = old_values.data_ptr<int32_t>();
-            const int32_t* new_p = new_values.data_ptr<int32_t>();
-            uint8_t* old_m = old_match.data_ptr<uint8_t>();
-            uint8_t* new_m = new_match.data_ptr<uint8_t>();
-            mark_matches_kernel<int32_t><<<blocks_old, threads, 0, stream>>>(
-                old_p, N, new_p, M, 0.0, old_m);
-            mark_matches_kernel<int32_t><<<blocks_new, threads, 0, stream>>>(
-                new_p, M, old_p, N, 0.0, new_m);
+            using T = int32_t;
+            // Sort copies for search
+            at::Tensor new_sorted = new_values.clone();
+            thrust::sort(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M);
+            at::Tensor old_sorted = old_values.clone();
+            thrust::sort(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N);
+
+            // For old_values vs new_sorted
+            at::Tensor lower_old = at::empty({N}, keys.options().dtype(at::kLong));
+            at::Tensor upper_old = at::empty({N}, keys.options().dtype(at::kLong));
+            thrust::lower_bound(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(old_values.data_ptr<T>()),
+                thrust::device_pointer_cast(old_values.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(lower_old.data_ptr<int64_t>()));
+            thrust::upper_bound(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(old_values.data_ptr<T>()),
+                thrust::device_pointer_cast(old_values.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(upper_old.data_ptr<int64_t>()));
+            mark_from_bounds<int64_t><<<blocks_old, threads, 0, stream>>>(
+                lower_old.data_ptr<int64_t>(), upper_old.data_ptr<int64_t>(), N, old_match.data_ptr<uint8_t>());
+
+            // For new_values vs old_sorted
+            at::Tensor lower_new = at::empty({M}, keys.options().dtype(at::kLong));
+            at::Tensor upper_new = at::empty({M}, keys.options().dtype(at::kLong));
+            thrust::lower_bound(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(new_values.data_ptr<T>()),
+                thrust::device_pointer_cast(new_values.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(lower_new.data_ptr<int64_t>()));
+            thrust::upper_bound(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(new_values.data_ptr<T>()),
+                thrust::device_pointer_cast(new_values.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(upper_new.data_ptr<int64_t>()));
+            mark_from_bounds<int64_t><<<blocks_new, threads, 0, stream>>>(
+                lower_new.data_ptr<int64_t>(), upper_new.data_ptr<int64_t>(), M, new_match.data_ptr<uint8_t>());
             break;
         }
         case at::kLong: {
-            const int64_t* old_p = old_values.data_ptr<int64_t>();
-            const int64_t* new_p = new_values.data_ptr<int64_t>();
-            uint8_t* old_m = old_match.data_ptr<uint8_t>();
-            uint8_t* new_m = new_match.data_ptr<uint8_t>();
-            mark_matches_kernel<int64_t><<<blocks_old, threads, 0, stream>>>(
-                old_p, N, new_p, M, 0.0, old_m);
-            mark_matches_kernel<int64_t><<<blocks_new, threads, 0, stream>>>(
-                new_p, M, old_p, N, 0.0, new_m);
+            using T = int64_t;
+            // Sort copies for search
+            at::Tensor new_sorted = new_values.clone();
+            thrust::sort(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M);
+            at::Tensor old_sorted = old_values.clone();
+            thrust::sort(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N);
+
+            // For old_values vs new_sorted
+            at::Tensor lower_old = at::empty({N}, keys.options().dtype(at::kLong));
+            at::Tensor upper_old = at::empty({N}, keys.options().dtype(at::kLong));
+            thrust::lower_bound(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(old_values.data_ptr<T>()),
+                thrust::device_pointer_cast(old_values.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(lower_old.data_ptr<int64_t>()));
+            thrust::upper_bound(policy,
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(new_sorted.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(old_values.data_ptr<T>()),
+                thrust::device_pointer_cast(old_values.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(upper_old.data_ptr<int64_t>()));
+            mark_from_bounds<int64_t><<<blocks_old, threads, 0, stream>>>(
+                lower_old.data_ptr<int64_t>(), upper_old.data_ptr<int64_t>(), N, old_match.data_ptr<uint8_t>());
+
+            // For new_values vs old_sorted
+            at::Tensor lower_new = at::empty({M}, keys.options().dtype(at::kLong));
+            at::Tensor upper_new = at::empty({M}, keys.options().dtype(at::kLong));
+            thrust::lower_bound(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(new_values.data_ptr<T>()),
+                thrust::device_pointer_cast(new_values.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(lower_new.data_ptr<int64_t>()));
+            thrust::upper_bound(policy,
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()),
+                thrust::device_pointer_cast(old_sorted.data_ptr<T>()) + N,
+                thrust::device_pointer_cast(new_values.data_ptr<T>()),
+                thrust::device_pointer_cast(new_values.data_ptr<T>()) + M,
+                thrust::device_pointer_cast(upper_new.data_ptr<int64_t>()));
+            mark_from_bounds<int64_t><<<blocks_new, threads, 0, stream>>>(
+                lower_new.data_ptr<int64_t>(), upper_new.data_ptr<int64_t>(), M, new_match.data_ptr<uint8_t>());
             break;
         }
         default:
@@ -130,7 +299,6 @@ std::tuple<at::Tensor, at::Tensor> diff_two_map_cuda(
     }
 
     // Use Thrust to count and compact remaining elements (where match == 0)
-    auto policy = thrust::cuda::par.on(stream);
 
     const uint8_t* old_m_ptr = old_match.data_ptr<uint8_t>();
     const uint8_t* new_m_ptr = new_match.data_ptr<uint8_t>();
