@@ -14,15 +14,10 @@
 #include <deque>
 #include <vector>
 #include <algorithm>
+#include <nvtx3/nvtx3.hpp>
 
-#ifdef USE_NVTX
-#include <nvToolsExt.h>
 #define NVTX_PUSH(name) nvtxRangePushA(name)
 #define NVTX_POP() nvtxRangePop()
-#else
-#define NVTX_PUSH(name) do{}while(0)
-#define NVTX_POP() do{}while(0)
-#endif
 
 __inline__ __device__ float warpReduceSum(float val)
 {
@@ -526,9 +521,9 @@ extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_c
     TORCH_CHECK(batch_offset.dtype() == at::kInt, "batch_offset must be int32 (torch.long)");
 
     // CPU pinned outputs must be provided
-    TORCH_CHECK(score_cpu.device().is_cpu() && score_cpu.is_pinned() && score_cpu.dim() == 1 && score_cpu.size(0) == s, "score_cpu must be pinned CPU [s]");
-    TORCH_CHECK(score_sorted_cpu.device().is_cpu() && score_sorted_cpu.is_pinned() && score_sorted_cpu.dim() == 1 && score_sorted_cpu.size(0) == s, "score_sorted_cpu must be pinned CPU [s]");
-    TORCH_CHECK(index_sorted_cpu.device().is_cpu() && index_sorted_cpu.is_pinned() && index_sorted_cpu.scalar_type() == at::kInt && index_sorted_cpu.dim() == 1 && index_sorted_cpu.size(0) == s, "index_sorted_cpu must be pinned CPU int32 [s]");
+    TORCH_CHECK(score_cpu.device().is_cpu() && score_cpu.is_pinned() && score_cpu.dim() == 1, "score_cpu must be pinned CPU [s]");
+    TORCH_CHECK(score_sorted_cpu.device().is_cpu() && score_sorted_cpu.is_pinned() && score_sorted_cpu.dim() == 1, "score_sorted_cpu must be pinned CPU [s]");
+    TORCH_CHECK(index_sorted_cpu.device().is_cpu() && index_sorted_cpu.is_pinned() && index_sorted_cpu.scalar_type() == at::kInt && index_sorted_cpu.dim() == 1, "index_sorted_cpu must be pinned CPU int32 [s]");
     TORCH_CHECK(score_cpu.scalar_type() == score.scalar_type(), "score_cpu dtype must match score dtype");
     TORCH_CHECK(score_sorted_cpu.scalar_type() == score.scalar_type(), "score_sorted_cpu dtype must match score dtype");
 
