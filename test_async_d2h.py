@@ -15,9 +15,9 @@ async_ext = load(
 def main():
     torch.manual_seed(0)
     device = "cuda"
-    N = 1 << 18  # number of rows
-    D = 128      # feature dimension
-    iters = 20
+    N = 500  # number of rows
+    D = 1024      # feature dimension
+    iters = 5
 
     handles = []
     host_buffers = []
@@ -30,13 +30,17 @@ def main():
     handles.append(h)
     host_buffers.append(host_out)
 
+
+    q = torch.randn(N, D, device=device, dtype=torch.float32)
+    k = torch.randn(N, D, device=device, dtype=torch.float32)
+    host_out = torch.empty(N, dtype=torch.float32, device="cpu", pin_memory=True)
+
+    torch.cuda.synchronize()
+    time.sleep(0.5)
     # Launch loop without synchronizing after D2H
     start = time.time()
     for t in range(iters):
         nvtx.range_push(f"iter_{t:02d}")
-        q = torch.randn(N, D, device=device, dtype=torch.float32)
-        k = torch.randn(N, D, device=device, dtype=torch.float32)
-        host_out = torch.empty(N, dtype=torch.float32, device="cpu", pin_memory=True)
 
         nvtx.range_push("enqueue_launch_async")
         t0 = time.time()
@@ -48,10 +52,10 @@ def main():
         handles.append(h)
         host_buffers.append(host_out)
 
-        nvtx.range_push("cpu_work")
-        # Do some unrelated CPU work to show we are not blocked by D2H
-        _ = sum(i * i for i in range(10000))
-        nvtx.range_pop()
+        # nvtx.range_push("cpu_work")
+        # # Do some unrelated CPU work to show we are not blocked by D2H
+        # _ = sum(i * i for i in range(10000))
+        # nvtx.range_pop()
 
         nvtx.range_pop()
 

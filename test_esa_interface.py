@@ -6,69 +6,7 @@ import subprocess
 import torch
 import pytest
 import time
-
-def build_shared():
-    # Build interface.so with nvcc using PyTorch headers/libs
-    try:
-        import torch
-        from torch.utils.cpp_extension import include_paths, library_paths
-    except Exception as e:
-        raise SystemExit("PyTorch is required to build with nvcc. Install with: pip install torch") from e
-
-    cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH") or "/usr/local/cuda"
-    cuda_inc = os.path.join(cuda_home, "include")
-    cuda_lib = os.path.join(cuda_home, "lib64")
-    if not os.path.isdir(cuda_inc) or not os.path.isdir(cuda_lib):
-        raise SystemExit(f"CUDA not found. Set CUDA_HOME or install to {cuda_home}")
-
-    py_inc = sysconfig.get_paths()["include"]
-
-    # Torch include/library paths
-    t_inc = include_paths()  # e.g., [.../torch/include, .../torch/include/torch/csrc/api/include]
-    t_lib = library_paths()  # e.g., [.../torch/lib]
-
-    # ABI flag must match the one PyTorch was built with
-    cxx11_abi = getattr(torch._C, "_GLIBCXX_USE_CXX11_ABI", 1)
-    abi_macro = f"-D_GLIBCXX_USE_CXX11_ABI={int(cxx11_abi)}"
-
-    print("==== nvcc_compile")
-    cmd = [
-        "nvcc",
-        "-O3", # release mode
-        # "-g", "-G", "-lineinfo", "-DTORCH_USE_CUDA_DSA", # debug mode
-        "-std=c++17",
-        "-Xcompiler",
-        "-fPIC",
-        "-shared",
-        "esa_kernels.cu",
-        "esa_interface.cc",
-        "esa_sm_copy.cu",
-        # includes
-        "-I" + py_inc,
-        "-I" + cuda_inc,
-        *[f"-I{p}" for p in t_inc],
-        # ABI macro
-        abi_macro,
-        "-DTORCH_EXTENSION_NAME=esa_interface",
-        # libs
-        "-L" + cuda_lib,
-        *[f"-L{p}" for p in t_lib],
-        # rpaths so interface.so can find libs at runtime (use -Xlinker for nvcc)
-        "-Xlinker", "-rpath", "-Xlinker", cuda_lib,
-        *[arg for p in t_lib for arg in ("-Xlinker", "-rpath", "-Xlinker", p)],
-        # link against torch and CUDA runtime
-        "-lc10",
-        "-lc10_cuda",
-        "-ltorch_cpu",
-        "-ltorch_cuda",
-        "-ltorch",
-        "-ltorch_python",
-        "-lcudart",
-        "-o",
-        "esa_interface.so",
-    ]
-    print("Building interface.so with:", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+from build_utils import build_shared
 
 def load_module():
     """
@@ -98,7 +36,7 @@ def load_module():
 
     so_path = pathlib.Path(__file__).with_name("esa_interface.so")
     if not so_path.exists():
-        build_shared()
+        build_shared(["./esa_interface.cc", "./esa_kernels.cu", "./esa_sm_copy.cu"], "esa_interface.so")
 
     # import importlib.machinery
     # import importlib.util
@@ -120,6 +58,7 @@ esa_repre = esa_lib.esa_repre
 esa_copy = esa_lib.esa_copy
 esa_copy_batch = esa_lib.esa_copy_batch
 esa_scatter_copy = esa_lib.esa_scatter_copy
+
 class style():
     RED = '\033[31m'
     GREEN = '\033[32m'
