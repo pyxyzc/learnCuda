@@ -414,6 +414,7 @@ void worker_loop() {
                 std::sort(idx.begin(), idx.end(), [&](int a, int b) {
                     float va = static_cast<float>(scores_ptr[s + a]);
                     float vb = static_cast<float>(scores_ptr[s + b]);
+                    if (va == vb) return a < b; // stable tie-breaker on original position
                     return va > vb; // descending
                 });
                 for (int i = 0; i < n; ++i) {
