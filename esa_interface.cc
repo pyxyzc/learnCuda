@@ -8,7 +8,7 @@
 
 namespace py = pybind11;
 
-extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index,
+extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor repre_index_cpu,
         torch::Tensor batch_offset, torch::Tensor score, torch::Tensor score_cpu, torch::Tensor score_sorted_cpu, torch::Tensor index_sorted_cpu,
         int batch, int s);
 
@@ -32,6 +32,7 @@ struct RetrievalInputTensor{
     torch::Tensor repre_cache;
     torch::Tensor q_index;
     torch::Tensor repre_index;
+    torch::Tensor repre_index_cpu;
     torch::Tensor batch_offset;
     int batch;
     int s;
@@ -51,6 +52,7 @@ int esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
     auto repre_cache = input.repre_cache;
     auto q_index = input.q_index;
     auto repre_index = input.repre_index;
+    auto repre_index_cpu = input.repre_index_cpu;
     auto batch_offset = input.batch_offset;
 
     auto score = output.score;
@@ -60,7 +62,7 @@ int esa_retrieval(RetrievalInputTensor input, RetrievalOutputTensor output){
     auto index_sorted_cpu = output.index_sorted_cpu;
 
     return esa_retrieval_launcher(
-        query, repre_cache, q_index, repre_index,
+        query, repre_cache, q_index, repre_index, repre_index_cpu,
         batch_offset, score,
         score_cpu, score_sorted_cpu, index_sorted_cpu,
         input.batch, input.s
@@ -80,6 +82,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def_readwrite("repre_cache", &RetrievalInputTensor::repre_cache)
         .def_readwrite("q_index", &RetrievalInputTensor::q_index)
         .def_readwrite("repre_index", &RetrievalInputTensor::repre_index)
+        .def_readwrite("repre_index_cpu", &RetrievalInputTensor::repre_index_cpu)
         .def_readwrite("batch_offset", &RetrievalInputTensor::batch_offset)
         .def_readwrite("batch", &RetrievalInputTensor::batch)
         .def_readwrite("s", &RetrievalInputTensor::s);

@@ -405,6 +405,7 @@ void worker_loop() {
         }
         if (!job) continue;
 
+        NVTX_PUSH("worker_argmin");
         // Perform segmented argsort on CPU
         const int32_t* offsets = job->offsets_cpu.data_ptr<int32_t>();
         int32_t* out_idx = job->index_sorted_cpu.data_ptr<int32_t>();
@@ -448,6 +449,7 @@ void worker_loop() {
         }
 
         job->ready.store(1, std::memory_order_release);
+        NVTX_POP();
     }
 }
 
@@ -512,7 +514,7 @@ extern "C" void esa_retrieval_shutdown() {
     }
 }
 
-extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index,
+extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_cache, torch::Tensor q_index, torch::Tensor repre_index, torch::Tensor repre_index_cpu,
         torch::Tensor batch_offset, torch::Tensor score, torch::Tensor score_cpu, torch::Tensor score_sorted_cpu, torch::Tensor index_sorted_cpu,
         int batch, int s){
     TORCH_CHECK(query.dim() == 3, "query dim must be 3");
@@ -586,19 +588,8 @@ extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_c
     ctx->score_sorted_cpu = score_sorted_cpu;
     ctx->index_sorted_cpu = index_sorted_cpu;
     ctx->repre_index_dev = repre_index;
-
-    // Allocate pinned CPU copies for offsets and repre_index
-    auto options_cpu_i32 = torch::TensorOptions().dtype(at::kInt).device(torch::kCPU).pinned_memory(true);
-    ctx->offsets_cpu = torch::empty({batch + 1}, options_cpu_i32);
-    ctx->repre_index_cpu = torch::empty({s}, options_cpu_i32);
-
-    // Async D2H for offsets and repre_index on the same compute stream
-    NVTX_PUSH("esa_retrieval: D2H metadata");
-    cudaMemcpyAsync(ctx->offsets_cpu.data_ptr<int32_t>(), batch_offset.data_ptr<int32_t>(),
-                    sizeof(int32_t) * (batch + 1), cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(ctx->repre_index_cpu.data_ptr<int32_t>(), repre_index.data_ptr<int32_t>(),
-                    sizeof(int32_t) * s, cudaMemcpyDeviceToHost, stream);
-    NVTX_POP();
+    ctx->offsets_cpu = batch_offset;
+    ctx->repre_index_cpu = repre_index_cpu;
 
     int handle;
     {
