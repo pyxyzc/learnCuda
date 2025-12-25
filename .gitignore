@@ -7,8 +7,8 @@ matmul2
 topk_kernel
 output.log
 retrieval_kernel
-retrieve_report.nsys-rep
-retrieve_report.sqlite
+*.nsys-rep
+*.sqlite
 repre_compute
 another_mean
 memcpy_compare_threads
@@ -16,12 +16,7 @@ memcpy_graph_test
 test_copy
 test_copy_by_streams
 test_cpu_overhead
-test_cpu_overhead.nsys-rep
-test_cpu_overhead_kernel.nsys-rep
-test_cpu_overhead_memcpy.nsys-rep
 __pycache__
-profile_out.nsys-rep
-profile_out.sqlite
 test_two_stream
 cuda_sm_copy
 *.so

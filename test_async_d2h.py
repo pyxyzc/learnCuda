@@ -42,9 +42,9 @@ def main():
         nvtx.range_push(f"iter_{t:02d}")
 
         # Create fresh inputs and a dedicated pinned output buffer per iteration to avoid aliasing
-        q = torch.randn(N, D, device=device, dtype=torch.float32)
-        k = torch.randn(N, D, device=device, dtype=torch.float32)
-        host_out = torch.empty(N, dtype=torch.float32, device="cpu", pin_memory=True)
+        # q = torch.randn(N, D, device=device, dtype=torch.float32)
+        # k = torch.randn(N, D, device=device, dtype=torch.float32)
+        # host_out = torch.empty(N, dtype=torch.float32, device="cpu", pin_memory=True)
 
         nvtx.range_push("enqueue_launch_async")
         t0 = time.time()
