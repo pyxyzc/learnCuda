@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
+#include <nvToolsExt.h>
 
 #include <unordered_map>
 #include <mutex>
@@ -45,6 +46,7 @@ std::unordered_map<int, std::unique_ptr<Context>> g_contexts;
 int g_next_handle = 1;
 
 void CUDART_CB host_callback(void* userData) {
+    nvtxRangePushA("host_callback_argmin");
     Context* ctx = reinterpret_cast<Context*>(userData);
     // Compute argmin on CPU over host_ptr[0..N)
     float min_val = std::numeric_limits<float>::infinity();
@@ -61,6 +63,7 @@ void CUDART_CB host_callback(void* userData) {
     ctx->result_idx = min_idx;
     ctx->result_val = min_val;
     ctx->ready.store(1, std::memory_order_release);
+    nvtxRangePop();
 }
 
 } // anonymous namespace
@@ -107,6 +110,7 @@ int launch_async(torch::Tensor q, torch::Tensor k, torch::Tensor host_out) {
     cudaStream_t stream = s.stream();
 
     // Launch kernel
+    nvtxRangePushA("enqueue: row_dot kernel");
     int threads = 256;
     int blocks = (static_cast<int>(N) + threads - 1) / threads;
     row_dot_f32<<<blocks, threads, 0, stream>>>(
@@ -116,8 +120,10 @@ int launch_async(torch::Tensor q, torch::Tensor k, torch::Tensor host_out) {
         static_cast<int>(N),
         static_cast<int>(D)
     );
+    nvtxRangePop();
 
     // Enqueue async D2H
+    nvtxRangePushA("enqueue: D2H scores");
     auto& ctx_ref = g_contexts.find(handle)->second;
     cudaError_t memStatus = cudaMemcpyAsync(
         ctx_ref->host_ptr,
@@ -127,10 +133,13 @@ int launch_async(torch::Tensor q, torch::Tensor k, torch::Tensor host_out) {
         stream
     );
     TORCH_CHECK(memStatus == cudaSuccess, "cudaMemcpyAsync failed: ", cudaGetErrorString(memStatus));
+    nvtxRangePop();
 
     // Enqueue host callback
+    nvtxRangePushA("enqueue: host_callback");
     cudaError_t cbStatus = cudaLaunchHostFunc(stream, host_callback, ctx_ref.get());
     TORCH_CHECK(cbStatus == cudaSuccess, "cudaLaunchHostFunc failed: ", cudaGetErrorString(cbStatus));
+    nvtxRangePop();
 
     // Return immediately without synchronization
     return handle;
