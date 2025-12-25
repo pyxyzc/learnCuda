@@ -74,13 +74,28 @@ __global__ void CudaCopyKernel(const void* src, void** dst, size_t size, size_t 
 
 __global__ void CudaCopyKernel(const void* src, void* dst, size_t size)
 {
-    int num_repeats = (size + gridDim.x * blockDim.x *CUDA_TRANS_UNIT_SIZE - 1) / (gridDim.x * blockDim.x * CUDA_TRANS_UNIT_SIZE);
-    int tid = blockDim.x * blockIdx.x + threadIdx.x;
-    for(int i = 0; i < num_repeats; ++i){
-        int offset = (i * gridDim.x * blockDim.x + tid) * CUDA_TRANS_UNIT_SIZE;
-        auto host = ((const uint8_t*)src) + offset;
-        auto device = ((uint8_t*)dst) + offset;
+    // Copy full 64B units with grid-stride, then handle the tail bytes once.
+    const size_t unit = CUDA_TRANS_UNIT_SIZE;
+    const size_t stride_bytes = static_cast<size_t>(gridDim.x) * blockDim.x * unit;
+    const size_t tid = static_cast<size_t>(blockDim.x) * blockIdx.x + threadIdx.x;
+
+    size_t offset = tid * unit;
+    const size_t last_full = size - (size % unit);
+
+    while (offset + unit <= last_full) {
+        const uint8_t* host = reinterpret_cast<const uint8_t*>(src) + offset;
+        volatile uint8_t* device = reinterpret_cast<volatile uint8_t*>(dst) + offset;
         CudaCopyUnit(host, device);
+        offset += stride_bytes;
+    }
+
+    // Tail copy (bytes that don't fill a full 64B unit) handled by a single thread.
+    if (tid == 0 && last_full < size) {
+        const uint8_t* host = reinterpret_cast<const uint8_t*>(src) + last_full;
+        uint8_t* device = reinterpret_cast<uint8_t*>(dst) + last_full;
+        for (size_t b = 0; b < size - last_full; ++b) {
+            device[b] = host[b];
+        }
     }
 }
 
