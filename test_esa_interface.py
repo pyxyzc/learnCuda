@@ -36,6 +36,7 @@ def load_module():
         except Exception as e:
             print(f"[warn] torch extension build failed, falling back to nvcc: {e}")
 
+    print("===== nvcc compile")
     so_path = pathlib.Path(__file__).with_name("esa_interface.so")
     if not so_path.exists():
         build_shared(["./esa_interface.cc", "./esa_kernels.cu", "./esa_sm_copy.cu"], "esa_interface.so")
@@ -106,14 +107,12 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     repre_index_cpu = torch.from_numpy(repre_index_np).to(torch.int32).pin_memory()
     q_index = torch.randint(0, batch_size, size = [total_blocks], dtype = torch.int32).cuda()
     score = torch.zeros(total_blocks, dtype = dtype).cuda()
-    score_sorted = torch.zeros(total_blocks, dtype = dtype).cuda()
 
     # Pinned CPU outputs for async D2H + CPU argsort
-    score_cpu = torch.empty(total_blocks, dtype=dtype, device="cpu", pin_memory=True)
-    score_sorted_cpu = torch.empty(total_blocks, dtype=dtype, device="cpu", pin_memory=True)
-    index_sorted_cpu = torch.empty(total_blocks, dtype=torch.int32, device="cpu", pin_memory=True)
+    score_cpu = torch.empty(5 * total_blocks, dtype=dtype, device="cpu", pin_memory=True)
+    score_sorted_cpu = torch.empty(5 * total_blocks, dtype=dtype, device="cpu", pin_memory=True)
+    index_sorted_cpu = torch.empty(5 * total_blocks, dtype=torch.int32, device="cpu", pin_memory=True)
 
-    index_sorted = torch.arange(0, total_blocks, dtype=torch.int32).cuda()
     batch_offset = []
     for i in range(batch_size + 1):
         batch_offset.append(i * num_repre_blocks)
@@ -148,9 +147,12 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
         handle = esa_retrieval(Input, Output)
         _wait(handle)
 
+    # start refresh
+    torch.cuda.synchronize()
+    time.sleep(1)
+
     iters = 10
     handles = []
-
     start = time.perf_counter_ns()
     for i in range(iters):
         with nvtx.range(f"esa_{i}"):
@@ -180,7 +182,7 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     print_blue(f"{' '*4}score diff: {diff.mean():.3f}(mean), {diff.max():.3f}(max)")
 
     # Validate CPU argsort vs naive result
-    diff_index = (index_sorted_cpu - index_gt.cpu().to(torch.int32)).abs().to(torch.float32)
+    diff_index = (index_sorted_cpu[:total_blocks] - index_gt.cpu().to(torch.int32)).abs().to(torch.float32)
     print_blue(f"{' '*4}index diff (CPU argsort vs naive): {diff_index.mean():.0f}(mean), {diff_index.max():.0f}(max)")
 
     # Optionally validate score_sorted_cpu order matches
@@ -189,7 +191,7 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
         score_gt[s:t][score_gt[s:t].argsort(descending=True)]
         for s, t in zip(batch_offset[:-1], batch_offset[1:])
     ]).cpu().to(score_sorted_cpu.dtype)
-    score_sorted_diff = (score_sorted_cpu - score_sorted_naive).abs()
+    score_sorted_diff = (score_sorted_cpu[:total_blocks] - score_sorted_naive).abs()
     print_blue(f"{' '*4}score_sorted diff: {score_sorted_diff.mean():.3f}(mean), {score_sorted_diff.max():.3f}(max)")
 
     print("")
@@ -341,4 +343,4 @@ def test_topk():
     print('np_times:', sum(times)/len(times)/1e6)
 
 if __name__ == "__main__":
-    test_esa_retrieval(2, 50, 40)
+    test_esa_retrieval(10, 100, 40)
