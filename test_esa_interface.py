@@ -144,11 +144,17 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
 
     # warmup a little bit
     for i in range(5):
-        handle = esa_retrieval(Input, Output)
-        _wait(handle)
+        esa_retrieval(Input, Output)
+        torch.cuda.synchronize()
+        score = Output.score_cpu
+        print("score: ", score)
+
+
+        # handle = esa_retrieval(Input, Output)
+        # torch.cuda.synchronize()
+        # _wait(handle)
 
     # start refresh
-    torch.cuda.synchronize()
     time.sleep(1)
 
     iters = 10
@@ -156,9 +162,13 @@ def test_esa_retrieval(batch_size, num_repre_blocks, num_q_heads):
     start = time.perf_counter_ns()
     for i in range(iters):
         with nvtx.range(f"esa_{i}"):
-            handles.append(esa_retrieval(Input, Output))
-    for h in handles:
-        _wait(h)
+            h = esa_retrieval(Input, Output)
+            torch.cuda.synchronize()
+            the_score = Output.score_cpu
+            the_index = torch.sort(the_score[:total_blocks])
+            handles.append(h)
+    # for h in handles:
+    #     _wait(h)
     duration = time.perf_counter_ns() - start
     print_green(f"{' '*4}esa_retrieval host API time (enqueue + async completion): {duration/1e6/iters:.3f} ms")
 
