@@ -537,7 +537,7 @@ extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_c
     size_t bytes = numWarps * sizeof(float);
 
     // Use current CUDA stream ('main stream' for this context)
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     ensure_cb_stream();
 
     NVTX_PUSH("esa_retrieval: kernel");
@@ -573,8 +573,15 @@ extern "C" int esa_retrieval_launcher(torch::Tensor query, torch::Tensor repre_c
     // Copy scores to pinned CPU using SM-copy kernel (must use current stream internally).
     // Make esa_copy run on our private compute stream by guarding the current stream.
     size_t score_bytes = static_cast<size_t>(s) * static_cast<size_t>(score.element_size());
-    NVTX_PUSH("esa_retrieval: esa_copy score->cpu");
-    esa_copy(score, score_cpu, score_bytes);
+    NVTX_PUSH("esa_retrieval: D2H score->cpu (cudaMemcpyAsync)");
+    cudaError_t memcpy_status = cudaMemcpyAsync(
+        score_cpu.data_ptr(),            // dst (pinned host)
+        score.data_ptr(),                // src (device)
+        score_bytes,
+        cudaMemcpyDeviceToHost,
+        stream
+    );
+    TORCH_CHECK(memcpy_status == cudaSuccess, "cudaMemcpyAsync score->cpu failed: ", cudaGetErrorString(memcpy_status));
     NVTX_POP();
 
     // Prepare ctx and D2H copies of metadata needed by CPU worker
